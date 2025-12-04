@@ -1,0 +1,15 @@
+# Loguard Configuration
+# Copy to /etc/loguard/config.toml and edit
+
+bot_token = "712345678:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+chat_id   = "123456789"
+
+# Optional: customize message format
+hostname  = "myserver.local"  # auto-detected if empty
+
+# Retry settings
+max_retries = 3
+retry_delay = 5
+
+# Queue file
+queue_file = "/var/log/loguard/pending_alerts.jsonl"
