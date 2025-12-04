@@ -1,6 +1,6 @@
 # Loguard - Real-time Linux Login Alerts to Telegram
 
-Instantly get notified on Telegram whenever anyone logs into your server — SSH, console, sudo, su, graphical login — everything.
+Instantly get notified on Telegram whenever anyone logs into your server; SSH, console, sudo, su, graphical login;etc.. everything.
 
 - Zero missed alerts (works offline with queue + retry)
 - One-line installation
@@ -18,16 +18,15 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Nowafen/loguard/mai
 
 ## After Installation
 
-1. Edit config:
+1. Edit config(Add your Telegram Bot Token and Chat ID):
    ```bash
    sudo loguard edit
    ```
-2. Add your Telegram Bot Token and Chat ID
-3. Test it:
+2. Test it:
    ```bash
    sudo loguard test
    ```
-4. Enable monitoring:
+3. Enable monitoring:
    ```bash
    sudo loguard enable
    ```
