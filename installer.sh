@@ -13,9 +13,9 @@ BIN_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/loguard"
 LOG_DIR="/var/log/loguard"
 
-SCRIPT_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/setting/login-alert.sh"
-BINARY_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/setting/loguard"
-CONFIG_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/config/config.toml"
+SCRIPT_URL="https://raw.githubusercontent.com/Nowafen/loguard/refs/heads/main/setting/login-alert.sh"
+BINARY_URL="https://raw.githubusercontent.com/Nowafen/loguard/refs/heads/main/setting/loguard"
+CONFIG_URL="https://raw.githubusercontent.com/Nowafen/loguard/refs/heads/main/config/config.toml"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
