@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.0.0"
 INSTALL_DIR="/opt/loguard"
 CONFIG_DIR="/etc/loguard"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
@@ -148,14 +148,35 @@ show_status() {
 }
 
 enable_alerts() {
-    local line="session optional pam_exec.so stdout $INSTALL_DIR/login-alert.sh"
-    for f in $PAM_FILES; do [[ -f "$f" ]] && sed -i '/login-alert.sh/d' "$f" && echo -e "# Loguard\n$line" >> "$f"; done
-    success "Loguard enabled"
+    local pam_line="session optional pam_exec.so stdout $INSTALL_DIR/login-alert.sh"
+    local added=0
+
+    for file in common-session common-session-noninteractive sshd login su sudo; do
+        local target="/etc/pam.d/$file"
+        [[ -f "$target" ]] || continue
+
+        # Remove any existing Loguard lines (clean state)
+        sed -i '/loguard\|login-alert\.sh/d' "$target" 2>/dev/null || true
+
+        # Add our lines
+        echo "# Loguard - Real-time login alerts" >> "$target"
+        echo "$pam_line" >> "$target"
+        ((added++))
+    done
+
+    [[ $added -gt 0 ]] && success "Loguard enabled on $added PAM configurations" || warn "No PAM files were modified"
 }
 
 disable_alerts() {
-    for f in $PAM_FILES; do sed -i 's/^\(session.*login-alert.sh\)/# \1/' "$f" 2>/dev/null || true; done
-    warn "Loguard disabled"
+    local removed=0
+    for file in common-session common-session-noninteractive sshd login su sudo; do
+        local target="/etc/pam.d/$file"
+        [[ -f "$target" ]] || continue
+        if sed -i '/loguard\|login-alert\.sh/d' "$target" 2>/dev/null; then
+            ((removed++))
+        fi
+    done
+    [[ $removed -gt 0 ]] && success "Loguard disabled (removed from $removed files)" || warn "Loguard was not active"
 }
 
 show_logs() { tail -n "${1:-20}" "$LOG_FILE" 2>/dev/null | tac | awk '{printf "%s %s | %-8s | %-15s | %s\n", $1,$2,$4,$7,$9}' || echo "No logs"; }

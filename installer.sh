@@ -5,7 +5,7 @@
 
 set -e
 
-REPO="mirage-x/loguard"
+REPO="Nowafen/loguard"
 BRANCH="main"
 
 INSTALL_DIR="/opt/loguard"
@@ -25,7 +25,7 @@ NC='\033[0m'
 
 banner() {
     echo -e "${CYAN}"
-    cat assets/banner.txt 2>/dev/null || cat <<'EOF'
+    cat <<'EOF'
 
 ██▓     ▒█████    ▄████  █    ██  ▄▄▄       ██▀███  ▓█████▄ 
 ▓██▒    ▒██▒  ██▒ ██▒ ▀█▒ ██  ▓██▒▒████▄    ▓██ ▒ ██▒▒██▀ ██▌
@@ -45,101 +45,53 @@ EOF
 }
 
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}Error: This installer must be run as root (use sudo)${NC}"
-        exit 1
-    fi
+    [[ $EUID -eq 0 ]] || { echo -e "${RED}Error: This installer must be run as root (use sudo)${NC}"; exit 1; }
 }
 
 detect_os() {
-    if [[ -f /etc/debian_version ]] || [[ -f /etc/lsb-release ]]; then
-        OS="debian"
-    elif [[ -f /etc/arch-release ]]; then
-        OS="arch"
-    elif [[ -f /etc/almalinux-release ]] || [[ -f /etc/rocky-release ]] || [[ -f /etc/fedora-release ]] || [[ -f /etc/redhat-release ]]; then
-        OS="rhel"
-    else
-        echo -e "${RED}Unsupported operating system${NC}"
-        exit 1
-    fi
+    if [[ -f /etc/debian_version ]] || [[ -f /etc/lsb-release ]]; then OS="debian"
+    elif [[ -f /etc/arch-release ]]; then OS="arch"
+    elif [[ -f /etc/almalinux-release ]] || [[ -f /etc/rocky-release ]] || [[ -f /etc/fedora-release ]] || [[ -f /etc/redhat-release ]]; then OS="rhel"
+    else echo -e "${RED}Unsupported operating system${NC}"; exit 1; fi
 }
 
 install_dependencies() {
     echo -e "${YELLOW}Installing required packages...${NC}"
     case "$OS" in
-        debian)
-            apt update -qq >/dev/null
-            apt install -y curl jq pamtester >/dev/null
-            ;;
-        rhel)
-            if command -v dnf >/dev/null; then
-                dnf install -y curl jq pamtester >/dev/null 2>&1
-            else
-                yum install -y curl jq pamtester >/dev/null 2>&1
-            fi
-            ;;
-        arch)
-            pacman -Sy --noconfirm curl jq >/dev/null
-            ;;
+        debian) apt update -qq >/dev/null; apt install -y curl jq >/dev/null ;;
+        rhel) command -v dnf >/dev/null && dnf install -y curl jq >/dev/null 2>&1 || yum install -y curl jq >/dev/null 2>&1 ;;
+        arch) pacman -Sy --noconfirm curl jq >/dev/null ;;
     esac
 }
 
-create_directories() {
-    mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$LOG_DIR" "$BIN_DIR"
-}
+create_directories() { mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$LOG_DIR" "$BIN_DIR"; }
 
 download_components() {
     echo -e "${YELLOW}Downloading Loguard components...${NC}"
-
-    echo "Downloading manager (loguard)..."
-    curl -fsSL "$BINARY_URL" -o "$INSTALL_DIR/loguard"
-    chmod +x "$INSTALL_DIR/loguard"
-
-    echo "Downloading alert script..."
-    curl -fsSL "$SCRIPT_URL" -o "$INSTALL_DIR/login-alert.sh"
-    chmod +x "$INSTALL_DIR/login-alert.sh"
-
-    echo "Downloading default configuration..."
+    curl -fsSL "$BINARY_URL" -o "$INSTALL_DIR/loguard" && chmod +x "$INSTALL_DIR/loguard"
+    curl -fsSL "$SCRIPT_URL" -o "$INSTALL_DIR/login-alert.sh" && chmod +x "$INSTALL_DIR/login-alert.sh"
     curl -fsSL "$CONFIG_URL" -o "$CONFIG_DIR/config.toml"
-
-    # Global symlink
     ln -sf "$INSTALL_DIR/loguard" "$BIN_DIR/loguard"
-}
-
-configure_pam() {
-    echo -e "${YELLOW}Configuring PAM authentication...${NC}"
-    local pam_line="session optional pam_exec.so stdout $INSTALL_DIR/login-alert.sh"
-
-    for pam_file in common-session common-session-noninteractive; do
-        local target="/etc/pam.d/$pam_file"
-        [[ -f "$target" ]] || continue
-
-        # Remove old Loguard lines if exist
-        sed -i '/loguard\|login-alert\.sh/d' "$target" 2>/dev/null || true
-
-        # Add new ones
-        echo "# Loguard - Real-time login alerts" >> "$target"
-        echo "$pam_line" >> "$target"
-    done
 }
 
 finish_message() {
     echo
     echo -e "${GREEN}Loguard installed successfully!${NC}"
     echo
+    echo -e "${YELLOW}Important: Monitoring is currently DISABLED${NC}"
+    echo
     echo "Next steps:"
-    echo "   1. Edit the config file:"
-    echo "      sudo nano $CONFIG_DIR/config.toml"
-    echo "   2. Add your Telegram Bot Token and Chat ID"
-    echo "   3. Test the connection:"
+    echo "   1. Configure Telegram settings:"
+    echo "      sudo loguard edit"
+    echo "   2. Test connection:"
     echo "      sudo loguard test"
-    echo "   4. Enable monitoring:"
+    echo "   3. Enable real-time alerts:"
     echo "      sudo loguard enable"
     echo
-    echo "Available commands:"
-    echo "   loguard status | enable | disable | test | logs | queue | edit | uninstall"
+    echo "To disable later: sudo loguard disable"
+    echo "To remove completely: sudo loguard uninstall"
     echo
-    echo "Thank you for using Loguard!"
+    echo -e "${CYAN}Thank you for using Loguard!${NC}"
 }
 
 # Main execution
@@ -149,5 +101,4 @@ detect_os
 install_dependencies
 create_directories
 download_components
-configure_pam
 finish_message
