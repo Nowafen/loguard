@@ -1,85 +1,62 @@
-# Loguard - Real-time Linux Login Alerts to Telegram
+# Loguard
 
-Instantly get notified on Telegram whenever anyone logs into your server; SSH, console, sudo, su, graphical login;etc.. everything.
+Real-time Telegram notifications for Linux logins (SSH, sudo, su, console, graphical).
 
-- Zero missed alerts (works offline with queue + retry)
-- One-line installation
-- Full control with `loguard` command
-- 100% open source & transparent
-- Works on Ubuntu, Debian, AlmaLinux, Rocky, Fedora, Arch
+## Features
 
-<img src="https://github.com/Nowafen/loguard/assets/photo.png" alt="Loguard Alert Example" width="400"/>
+- Offline queue + auto-retry (zero missed alerts)
+- One-line install
+- CLI management: `loguard status | enable | disable | test | logs | queue | edit | uninstall`
+- Works on Ubuntu, Debian, Fedora, RHEL, Arch
 
-## One-line Installation
+## Install
 
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Nowafen/loguard/main/installer.sh)"
 ```
 
-## After Installation
+## Setup
 
-1. Edit config(Add your Telegram Bot Token and Chat ID):
-   ```bash
-   sudo loguard edit
-   ```
-2. Test it:
-   ```bash
-   sudo loguard test
-   ```
-3. Enable monitoring:
-   ```bash
-   sudo loguard enable
-   ```
+1. Configure: `sudo loguard edit` (add Bot Token & Chat ID)
+2. Test: `sudo loguard test`
+3. Enable: `sudo loguard enable`
 
-## Available Commands
+## Commands
 
-```bash
-sudo loguard              # Show status (same as 'status')
-sudo loguard status       # Full system status
-sudo loguard enable       # Turn on login monitoring
-sudo loguard disable      # Temporarily pause alerts
-sudo loguard test         # Send test message
-sudo loguard logs         # Show recent login alerts
-sudo loguard logs 50      # Show last 50 alerts
-sudo loguard queue        # Show pending (unsent) alerts
-sudo loguard clear-queue  # Clear pending queue
-sudo loguard edit         # Open config in editor
-sudo loguard restart      # Re-apply PAM rules
-sudo loguard uninstall    # Completely remove Loguard
-```
+| Command              | Description                  |
+|----------------------|------------------------------|
+| `loguard status`    | Show status                  |
+| `loguard enable`    | Activate monitoring          |
+| `loguard disable`   | Pause alerts                 |
+| `loguard test`      | Send test message            |
+| `loguard logs [n]`  | View recent alerts (default 20) |
+| `loguard queue`     | Check pending alerts         |
+| `loguard edit`      | Interactive config wizard    |
+| `loguard uninstall` | Full removal                 |
 
-## Get Telegram Bot
+## Telegram Setup
 
-1. Talk to [@BotFather](https://t.me/BotFather)
-2. Send `/newbot` and follow instructions
-3. Copy the token
-4. Start bot and send `/start`
-5. Get your Chat ID: https://t.me/userinfobot
+1. Message [@BotFather](https://t.me/BotFather): `/newbot`
+2. Get token
+3. Start your bot: `/start`
+4. Get Chat ID: [@userinfobot](https://t.me/userinfobot)
 
-## Files Location
+## Locations
 
 - Config: `/etc/loguard/config.toml`
 - Logs: `/var/log/loguard/`
-- Main binary: `/opt/loguard/loguard`
+- Binary: `/opt/loguard/loguard`
 
-## Security & Privacy
+## Security
 
-- No external servers
-- No data collection
-- All code is public and auditable
-- Queue stored locally, never lost
+- No external calls except Telegram API
+- Local queue storage
+- Fully auditable open-source code
 
-## Uninstall (if you ever need to)
+## Uninstall
 
 ```bash
 sudo loguard uninstall
 ```
 
-## Author
-
-Nowafen – exploit developer
-GitHub: https://github.com/Nowafen/loguard
-
----
-
-Created by [MNM](https://x.com/Nowafen) 
+[GitHub](https://github.com/Nowafen/loguard) | Author: Nowafen
