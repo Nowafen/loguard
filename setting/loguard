@@ -1,0 +1,191 @@
+#!/usr/bin/bash
+# Loguard - Real-time Linux Login Alert to Telegram
+# Version: 1.2.0
+# Author: mirage-x
+# GitHub: https://github.com/mirage-x/loguard
+
+set -euo pipefail
+
+VERSION="1.0.0"
+INSTALL_DIR="/opt/loguard"
+CONFIG_DIR="/etc/loguard"
+CONFIG_FILE="$CONFIG_DIR/config.toml"
+QUEUE_FILE="/var/log/loguard/pending_alerts.jsonl"
+LOG_FILE="/var/log/loguard/alert.log"
+PAM_FILES="/etc/pam.d/common-session /etc/pam.d/common-session-noninteractive /etc/pam.d/sshd /etc/pam.d/login /etc/pam.d/su /etc/pam.d/sudo"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+
+log() { echo -e "${BLUE}[Loguard]$NC $*"; }
+success() { echo -e "${GREEN}Success$NC $*"; }
+warn() { echo -e "${YELLOW}Warning$NC $*"; }
+error() { echo -e "${RED}Error$NC $*"; }
+
+check_root() {
+    [[ $EUID -eq 0 ]] || { error "This command must be run as root (use sudo)"; exit 1; }
+}
+
+load_config() {
+    [[ -f "$CONFIG_FILE" ]] || return 1
+    source <(grep -E '^(bot_token|chat_id|hostname) *=' "$CONFIG_FILE" | sed 's/ *= */=/g')
+    BOT_TOKEN="${bot_token:-}"
+    CHAT_ID="${chat_id:-}"
+    HOSTNAME="${hostname:-$(hostname)}"
+    return 0
+}
+
+is_enabled() {
+    grep -q "^session.*pam_exec.so.*login-alert.sh" $PAM_FILES 2>/dev/null || return 1
+    return 0
+}
+
+is_disabled() {
+    grep -q "^#session.*pam_exec.so.*login-alert.sh" $PAM_FILES 2>/dev/null && ! is_enabled
+}
+
+count_pending() {
+    [[ -f "$QUEUE_FILE" ]] && wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0
+}
+
+last_alert() {
+    tail -1 "$LOG_FILE" 2>/dev/null | awk '{print $1" "$2" → "$4"@"$5" from "$7}' || echo "Never"
+}
+
+telegram_test() {
+    load_config || { error "Config not found or invalid"; return 1; }
+    [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]] || { error "bot_token or chat_id missing in config"; return 1; }
+    local msg="*Loguard Test Message*%0AHost: <code>$HOSTNAME</code>%0ATime: <code>$(date '+%Y-%m-%d %H:%M:%S')</code>%0AStatus: Working perfectly!"
+    if curl -s -m 10 --data "chat_id=$CHAT_ID" --data "text=$msg" --data "parse_mode=HTML" \
+       "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" > /dev/null; then
+        success "Test message sent! Check your Telegram."
+    else
+        error "Failed to send test message. Check token/chat_id/internet."
+    fi
+}
+
+show_status() {
+    echo -e "${BLUE}Loguard Login Alert System${NC}"
+    if is_enabled; then
+        echo -e "Status:      ${GREEN}Enabled${NC}              [OK]"
+    else
+        echo -e "Status:      ${RED}Disabled${NC}             [Paused]"
+    fi
+    if load_config; then
+        echo -e "Config:      $CONFIG_FILE          ${GREEN}Valid${NC}"
+        [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]] && echo -e "Telegram:    ${GREEN}Configured${NC}" || echo -e "Telegram:    ${RED}Not configured${NC}"
+    else
+        echo -e "Config:      ${RED}Missing or invalid${NC}"
+    fi
+    echo -e "PAM Rules:   $(grep -l "login-alert.sh" $PAM_FILES 2>/dev/null | wc -l) files active"
+    local pending=$(count_pending)
+    [[ $pending -gt 0 ]] && echo -e "Queue:       ${YELLOW}$pending pending messages${NC}" || echo -e "Queue:       0 pending messages"
+    echo -e "Last Alert:  $(last_alert)"
+    echo -e "Version:     $VERSION"
+}
+
+show_logs() {
+    local n=${1:-20}
+    [[ $n -gt 200 ]] && n=200
+    echo -e "${BLUE}Last $n login alerts (most recent first):${NC}"
+    tail -n "$n" "$LOG_FILE" 2>/dev/null | tac | awk '{printf "%s %s | %-8s | %-6s | %-15s | %s\n", $1, $2, $4, $5, $7, $9}' || echo "No alerts yet."
+}
+
+show_queue() {
+    local count=$(count_pending)
+    echo -e "${BLUE}Pending alerts: $count unsent message(s)${NC}"
+    [[ $count -eq 0 ]] && return
+    echo "Preview:"
+    jq -r '.msg' "$QUEUE_FILE" | head -5 | sed 's/%0A/\n/g' | sed 's/<[^>]*>//g' | nl
+    [[ $count -gt 5 ]] && echo "... and $(($count - 5)) more."
+}
+
+enable_alerts() {
+    local line="session optional pam_exec.so stdout $INSTALL_DIR/login-alert.sh"
+    for f in $PAM_FILES; do
+        [[ -f "$f" ]] || continue
+        sed -i '/login-alert.sh/d' "$f"
+        echo -e "# Loguard Login Alert\n$line" >> "$f"
+    done
+    success "Loguard enabled successfully"
+}
+
+disable_alerts() {
+    for f in $PAM_FILES; do
+        sed -i 's/^\(session.*pam_exec.so.*login-alert.sh\)/# \1/' "$f" 2>/dev/null || true
+    done
+    warn "Loguard disabled (alerts paused)"
+}
+
+clear_queue() {
+    read -p "Clear all pending alerts? This cannot be undone [y/N]: " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; return; }
+    : > "$QUEUE_FILE"
+    success "Pending queue cleared."
+}
+
+edit_config() {
+    ${EDITOR:-${VISUAL:-nano}} "$CONFIG_FILE"
+}
+
+uninstall() {
+    echo -e "${RED}WARNING: This will completely remove Loguard${NC}"
+    read -p "Are you sure? [y/N]: " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "Uninstall cancelled."; exit 0; }
+    for f in $PAM_FILES; do sed -i '/loguard\|login-alert.sh/d' "$f" 2>/dev/null || true; done
+    rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "/var/log/loguard" "/usr/local/bin/loguard"
+    success "Loguard has been completely removed. Goodbye!"
+}
+
+show_help() {
+    cat << EOF
+${BLUE}Loguard v$VERSION${NC} - Real-time Linux Login Alert to Telegram
+
+Usage: loguard <command>
+
+Commands:
+  status        Show current status and info
+  enable        Enable login monitoring
+  disable       Temporarily disable alerts
+  test          Send a test message to Telegram
+  logs [n]      Show last n alerts (default: 20)
+  queue         Show pending unsent alerts
+  clear-queue   Delete all pending alerts
+  edit          Open config file in editor
+  restart       Disable → Enable (re-apply rules)
+  version       Show version
+  uninstall     Remove Loguard completely
+  help          Show this help
+
+Examples:
+  sudo loguard status
+  sudo loguard test
+  sudo loguard logs 50
+  sudo loguard enable
+
+Config: /etc/loguard/config.toml
+GitHub: https://github.com/mirage-x/loguard
+EOF
+}
+
+main() {
+    [[ -f "$INSTALL_DIR/loguard" ]] || { error "Loguard not installed properly."; exit 1; }
+    mkdir -p "$CONFIG_DIR" "/var/log/loguard"
+
+    case "${1:-}" in
+        status|"")          show_status ;;
+        enable)             check_root; enable_alerts ;;
+        disable)            check_root; disable_alerts ;;
+        test)               check_root; telegram_test ;;
+        logs)               show_logs "${2:-}" ;;
+        queue)              show_queue ;;
+        clear-queue)        check_root; clear_queue ;;
+        edit)               check_root; edit_config ;;
+        restart)            check_root; disable_alerts; enable_alerts ;;
+        version)            echo "Loguard v$VERSION" ;;
+        uninstall)          check_root; uninstall ;;
+        help|-h)            show_help ;;
+        *)                  error "Unknown command: $1"; echo; show_help; exit 1 ;;
+    esac
+}
+
+main "$@"
