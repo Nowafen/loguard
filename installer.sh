@@ -149,7 +149,7 @@ finish_message() {
     echo "      ${CYAN}sudo loguard enable${NC}"
     echo
     echo -e "   To disable later: ${GRAY}sudo loguard disable${NC}"
-    echo -e "   To remove completely: ${GRAY}sudo loguard uninstallmelden
+    echo -e "   To remove completely: ${GRAY}sudo loguard uninstallmelden "
 
     echo
     echo -e "${CYAN}${BOLD}Thank you for using Loguard!${NC}"
