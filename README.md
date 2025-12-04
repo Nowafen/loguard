@@ -1,4 +1,3 @@
-```markdown
 # Loguard - Real-time Linux Login Alerts to Telegram
 
 Instantly get notified on Telegram whenever anyone logs into your server — SSH, console, sudo, su, graphical login — everything.
