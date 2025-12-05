@@ -1,57 +1,88 @@
 #!/bin/bash
 # Loguard Login Alert Script - DO NOT EDIT MANUALLY
+# Called by PAM on every successful login
+
 CONFIG="/etc/loguard/config.toml"
 QUEUE="/var/log/loguard/pending_alerts.jsonl"
 LOG="/var/log/loguard/alert.log"
 
+# Exit if config missing or not a session open
 [[ -f "$CONFIG" ]] || exit 0
-source <(grep = "$CONFIG" | sed 's/ *= */=/g')
+[[ "$PAM_TYPE" == "open_session" ]] || exit 0
 
-[[ "$PAM_TYPE" != "open_session" ]] && exit 0
+# Load config
+source <(grep -E '^(bot_token|chat_id|hostname) *=' "$CONFIG" | sed 's/ *= */=/g' 2>/dev/null || true)
 
-mkdir -p "$(dirname "$QUEUE")" "$(dirname "$LOG")"
-touch "$QUEUE"
+BOT_TOKEN="${bot_token:-}"
+CHAT_ID="${chat_id:-}"
+HOSTNAME="${hostname:-$(hostname)}"
 
+# Skip if no token/chat_id
+[[ -z "$BOT_TOKEN" || -z "$CHAT_ID" ]] && exit 0
+
+# Gather login info
+USER="$PAM_USER"
+SERVICE="${PAM_SERVICE:-unknown}"
+RHOST="${PAM_RHOST:-${SSH_CLIENT%% *}}"
+[[ -z "$RHOST" || "$RHOST" == "?" ]] && RHOST="local"
+TTY="${PAM_TTY:-console}"
+TIME="$(date '+%Y-%m-%d %H:%M:%S')"
+
+# Build clean, human-readable message
+MESSAGE="*New Login Detected*
+Host: <code>$HOSTNAME</code>
+User: <code>$USER</code>
+Service: <code>$SERVICE</code>
+From: <code>$RHOST</code>
+TTY: <code>$TTY</code>
+Time: <code>$TIME</code>"
+
+# Send to Telegram (returns true on HTTP 200)
 send_telegram() {
     local text="$1"
-    local response
-    response=$(curl -s -w "%{http_code}" -m 10 --data "chat_id=$chat_id" --data "text=$text" --data "parse_mode=HTML" \
-         "https://api.telegram.org/bot$bot_token/sendMessage" 2>/dev/null)
-    local http_code="${response: -3}"
-    [[ "$http_code" == "200" ]]  # Check HTTP 200 OK
+    local resp
+    resp=$(curl -s -o /dev/null -w "%{http_code}" -m 10 \
+        --data "chat_id=$CHAT_ID" \
+        --data "text=$text" \
+        --data "parse_mode=HTML" \
+        "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" 2>/dev/null)
+    [[ "$resp" == "200" ]]
 }
 
-hostname=${hostname:-$(hostname)}
-time=$(date '+%Y-%m-%d %H:%M:%S')
-ip=${PAM_RHOST:-${SSH_CLIENT%% *}}
-[[ "$ip" == "?" || -z "$ip" ]] && ip="local"
-service=${PAM_SERVICE:-unknown}
+# Ensure directories exist
+mkdir -p "$(dirname "$QUEUE")" "$(dirname "$LOG")"
+touch "$QUEUE" "$LOG"
 
-msg="*Login Alert*%0A%F0%9F%94%B8 Host: <code>$hostname</code>%0A%F0%9F%91%A4 User: <code>$PAM_USER</code>%0A%F0%9F%94%87 Service: <code>$service</code>%0A%F0%9F%94H From: <code>$ip</code>%0A%F0%9F%96%A5 TTY: <code>${PAM_TTY:-console}</code>%0A%F0%9F%95%90 Time: <code>$time</code>"
+# Add new alert to queue
+printf '%s\n' "{\"ts\":$(date +%s),\"user\":\"$USER\",\"service\":\"$SERVICE\",\"from\":\"$RHOST\",\"tty\":\"$TTY\",\"msg\":$(printf '%s' "$MESSAGE" | jq -R .)}" >> "$QUEUE"
 
-timestamp=$(date +%s)
-echo "{\"ts\": $timestamp, \"msg\": $(printf '%s' "$msg" | jq -Rs .)}" >> "$QUEUE"
-
-temp_file=$(mktemp)
-processed=0
-sent=0
+# Process entire queue
+temp_queue=$(mktemp)
+sent_count=0
+failed_count=0
 
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
+
     msg=$(echo "$line" | jq -r '.msg')
-    
+    user=$(echo "$line" | jq -r '.user')
+    service=$(echo "$line" | jq -r '.service')
+    from=$(echo "$line" | jq -r '.from')
+    tty=$(echo "$line" | jq -r '.tty')
+
     if send_telegram "$msg"; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') SENT $PAM_USER $service $ip $PAM_TTY" >> "$LOG"
-        ((sent++))
+        echo "$TIME | SENT   | $user | $service | $from | $tty" >> "$LOG"
+        ((sent_count++))
     else
-        echo "$line" >> "$temp_file"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') FAILED $PAM_USER $service $ip $PAM_TTY" >> "$LOG"
+        echo "$line" >> "$temp_queue"
+        echo "$TIME | FAILED | $user | $service | $from | $tty" >> "$LOG"
+        ((failed_count++))
     fi
-    ((processed++))
 done < "$QUEUE"
 
-mv "$temp_file" "$QUEUE" 2>/dev/null || rm -f "$temp_file"
+# Replace queue with only failed ones
+mv "$temp_queue" "$QUEUE" 2>/dev/null || rm -f "$temp_queue"
 chmod 600 "$QUEUE"
 
-# Log summary
-echo "$(date '+%Y-%m-%d %H:%M:%S') PROCESSED $processed (SENT $sent)" >> "$LOG"
+# Summary log
+echo "$TIME | QUEUE  | Processed: $((sent_count + failed_count)), Sent: $sent_count, Pending: $failed_count" >> "$LOG"
