@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 # Loguard - Real-time Linux Login Alert to Telegram
-# Version: 1.2.0
+# Version: 1.0.0
 # GitHub: https://github.com/Nowafen/loguard
 
 set -euo pipefail
@@ -11,7 +11,9 @@ CONFIG_DIR="/etc/loguard"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
 QUEUE_FILE="/var/log/loguard/pending_alerts.jsonl"
 LOG_FILE="/var/log/loguard/alert.log"
-PAM_FILES="/etc/pam.d/common-session /etc/pam.d/common-session-noninteractive /etc/pam.d/sshd /etc/pam.d/login /etc/pam.d/su /etc/pam.d/sudo"
+PAM_FILES="/etc/pam.d/common-session /etc/pam.d/common-session-noninteractive /etc/pam.d/sshd /etc/pam.d/login /etc/pam.d/su /etc/pam.d/sudo /etc/pam.d/sudo-i /etc/pam.d/gdm-password"
+VERSION_URL="https://raw.githubusercontent.com/Nowafen/loguard/refs/heads/main/version.txt"
+REPO_URL="https://raw.githubusercontent.com/Nowafen/loguard/refs/heads/main/setting/loguard"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
@@ -121,75 +123,172 @@ edit_config_wizard() {
     done
 }
 
-# --- بقیه توابع بدون تغییر ---
-is_enabled() { grep -q "^session.*pam_exec.so.*login-alert.sh" $PAM_FILES 2>/dev/null || return 1; return 0; }
-count_pending() { [[ -f "$QUEUE_FILE" ]] && wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0; }
-last_alert() { tail -1 "$LOG_FILE" 2>/dev/null | awk '{print $1" "$2" → "$4"@"$5" from "$7}' || echo "Never"; }
+is_enabled() {
+    grep -q "^session.*pam_exec.so.*login-alert.sh" $PAM_FILES 2>/dev/null || return 1
+    return 0
+}
+
+count_pending() {
+    [[ -f "$QUEUE_FILE" ]] && wc -l < "$QUEUE_FILE" 2>/dev/null || echo 0
+}
+
+last_alert() {
+    tail -1 "$LOG_FILE" 2>/dev/null | awk '
+    /SENT/ { 
+        split($0, a, " "); 
+        user = a[4]; service = a[5]; ip = a[6]; tty = a[7]; 
+        print a[1]" "a[2]" → "user"@"service from "ip 
+    }
+    /FAILED/ { 
+        split($0, a, " "); 
+        user = a[4]; service = a[5]; ip = a[6]; tty = a[7]; 
+        print a[1]" "a[2]" → "user"@"service (FAILED) from "ip 
+    }
+    ' || echo "Never"
+}
 
 telegram_test() {
     load_config || { error "Config not found or invalid"; return 1; }
     [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]] || { error "bot_token or chat_id missing in config"; return 1; }
     local msg="*Loguard Test*%0AHost: <code>$(hostname)</code>%0ATime: <code>$(date '+%Y-%m-%d %H:%M:%S')</code>"
-    if curl -s -m 10 --data "chat_id=$CHAT_ID" --data "text=$msg" --data "parse_mode=HTML" \
-       "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" > /dev/null; then
+    local response
+    response=$(curl -s -w "%{http_code}" -m 10 --data "chat_id=$CHAT_ID" --data "text=$msg" --data "parse_mode=HTML" \
+       "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" 2>/dev/null)
+    local http_code="${response: -3}"
+    if [[ "$http_code" == "200" ]]; then
         success "Test message sent! Check your Telegram."
     else
-        error "Failed to send. Check token/chat_id/internet."
+        error "Failed to send (HTTP $http_code). Check token/chat_id/internet."
     fi
 }
 
 show_status() {
     echo -e "${BLUE}Loguard Login Alert System${NC}"
-    is_enabled && echo -e "Status:      ${GREEN}Enabled${NC}" || echo -e "Status:      ${RED}Disabled${NC}"
-    load_config && [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]] && echo -e "Telegram:    ${GREEN}Configured${NC}" || echo -e "Telegram:    ${RED}Not configured${NC}"
-    echo -e "Queue:       $(count_pending) pending"
+    if is_enabled; then
+        echo -e "Status:      ${GREEN}Enabled${NC}              [OK]"
+    else
+        echo -e "Status:      ${RED}Disabled${NC}             [Paused]"
+    fi
+    if load_config; then
+        echo -e "Config:      $CONFIG_FILE          ${GREEN}Valid${NC}"
+        [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]] && echo -e "Telegram:    ${GREEN}Configured${NC}" || echo -e "Telegram:    ${RED}Not configured${NC}"
+    else
+        echo -e "Config:      ${RED}Missing or invalid${NC}"
+    fi
+    local pending=$(count_pending)
+    [[ $pending -gt 0 ]] && echo -e "Queue:       ${YELLOW}$pending pending messages${NC}" || echo -e "Queue:       0 pending messages"
     echo -e "Last Alert:  $(last_alert)"
     echo -e "Version:     $VERSION"
 }
 
+show_logs() {
+    local n=${1:-20}
+    [[ $n -gt 200 ]] && n=200
+    echo -e "${BLUE}Last $n login alerts (most recent first):${NC}"
+    tail -n "$n" "$LOG_FILE" 2>/dev/null | tac | awk '
+    /SENT/ { printf "%s %s | %-8s | %-8s | %-15s | %s\n", $1, $2, $4, $5, $6, $7; }
+    /FAILED/ { printf "%s %s | %-8s | %-8s | %-15s | %s (FAILED)\n", $1, $2, $4, $5, $6, $7; }
+    /PROCESSED/ { printf "%s %s | SUMMARY: PROCESSED %s\n", $1, $2, $4; }
+    ' || echo "No alerts yet."
+}
+
+show_queue() {
+    local count=$(count_pending)
+    echo -e "${BLUE}Pending alerts: $count unsent message(s)${NC}"
+    [[ $count -eq 0 ]] && return
+    echo "Preview (first 5):"
+    head -5 "$QUEUE_FILE" | jq -r '.msg // empty' | sed 's/%0A/\n/g; s/<code>\([^<]*\)<\/code>/\1/g' | nl -w2 -s': '
+    [[ $count -gt 5 ]] && echo "... and $(($count - 5)) more."
+}
+
 enable_alerts() {
-    local pam_line="session optional pam_exec.so stdout $INSTALL_DIR/login-alert.sh"
+    local line="session optional pam_exec.so stdout $INSTALL_DIR/login-alert.sh"
     local added=0
-
-    for file in common-session common-session-noninteractive sshd login su sudo; do
-        local target="/etc/pam.d/$file"
-        [[ -f "$target" ]] || continue
-
-        # Remove any existing Loguard lines (clean state)
-        sed -i '/loguard\|login-alert\.sh/d' "$target" 2>/dev/null || true
-
-        # Add our lines
-        echo "# Loguard - Real-time login alerts" >> "$target"
-        echo "$pam_line" >> "$target"
+    for f in $PAM_FILES; do
+        [[ -f "$f" ]] || continue
+        sed -i '/loguard\|login-alert\.sh/d' "$f"
+        echo "# Loguard - Real-time login alerts" >> "$f"
+        echo "$line" >> "$f"
         ((added++))
     done
-
     [[ $added -gt 0 ]] && success "Loguard enabled on $added PAM configurations" || warn "No PAM files were modified"
 }
 
 disable_alerts() {
     local removed=0
-    for file in common-session common-session-noninteractive sshd login su sudo; do
-        local target="/etc/pam.d/$file"
-        [[ -f "$target" ]] || continue
-        if sed -i '/loguard\|login-alert\.sh/d' "$target" 2>/dev/null; then
+    for f in $PAM_FILES; do
+        [[ -f "$f" ]] || continue
+        if sed -i '/loguard\|login-alert\.sh/d' "$f" 2>/dev/null; then
             ((removed++))
         fi
     done
     [[ $removed -gt 0 ]] && success "Loguard disabled (removed from $removed files)" || warn "Loguard was not active"
 }
 
-show_logs() { tail -n "${1:-20}" "$LOG_FILE" 2>/dev/null | tac | awk '{printf "%s %s | %-8s | %-15s | %s\n", $1,$2,$4,$7,$9}' || echo "No logs"; }
-show_queue() { echo "Pending: $(count_pending)"; [[ $(count_pending) -gt 0 ]] && head -5 "$QUEUE_FILE" | jq -r '.msg' | nl; }
-clear_queue() { read -p "Clear queue? [y/N]: " a; [[ "$a" =~ ^[Yy]$ ]] && : > "$QUEUE_FILE" && success "Queue cleared"; }
-uninstall() { read -p "Remove Loguard completely? [y/N]: " a; [[ "$a" =~ ^[Yy]$ ]] && rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "/var/log/loguard" && success "Removed"; }
+clear_queue() {
+    read -p "Clear all pending alerts? This cannot be undone [y/N]: " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; return; }
+    : > "$QUEUE_FILE"
+    success "Pending queue cleared."
+}
+
+uninstall() {
+    echo -e "${RED}WARNING: This will completely remove Loguard${NC}"
+    read -p "Are you sure? [y/N]: " ans
+    [[ "$ans" =~ ^[Yy]$ ]] || { echo "Uninstall cancelled."; exit 0; }
+    for f in $PAM_FILES; do sed -i '/loguard\|login-alert\.sh/d' "$f" 2>/dev/null || true; done
+    rm -rf "$INSTALL_DIR" "$CONFIG_DIR" "/var/log/loguard" "/usr/local/bin/loguard"
+    success "Loguard has been completely removed. Goodbye!"
+}
+
+update_loguard() {
+    check_root
+    echo -e "${YELLOW}Checking for updates...${NC}"
+    local remote_version
+    remote_version=$(curl -s "$VERSION_URL" | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' || echo "0.0.0")
+    if [[ "$remote_version" > "$VERSION" ]]; then
+        echo -e "${GREEN}New version available: $remote_version (current: $VERSION)${NC}"
+        read -p "Update now? [Y/n]: " confirm
+        [[ "$confirm" =~ ^[Nn]$ ]] && { echo "Update cancelled."; return; }
+        curl -fsSL "$REPO_URL" -o "$INSTALL_DIR/loguard.new" && chmod +x "$INSTALL_DIR/loguard.new"
+        mv "$INSTALL_DIR/loguard.new" "$INSTALL_DIR/loguard"
+        sed -i "s/VERSION=\"$VERSION\"/VERSION=\"$remote_version\"/" "$INSTALL_DIR/loguard"
+        ln -sf "$INSTALL_DIR/loguard" "/usr/local/bin/loguard"
+        success "Updated to v$remote_version! Restart with: sudo loguard restart"
+    else
+        echo -e "${GREEN}You are up to date (v$VERSION).${NC}"
+    fi
+}
 
 show_help() {
     cat << EOF
-Loguard v$VERSION - Login Alerts to Telegram
+${BLUE}Loguard v$VERSION${NC} - Real-time Linux Login Alert to Telegram
 
-Commands: status | enable | disable | test | logs [n] | queue | clear-queue | edit | restart | uninstall | help
-Use: sudo loguard <command>
+Usage: loguard <command>
+
+Commands:
+  status        Show current status and info
+  enable        Enable login monitoring
+  disable       Temporarily disable alerts
+  test          Send a test message to Telegram
+  logs [n]      Show last n alerts (default: 20)
+  queue         Show pending unsent alerts
+  clear-queue   Delete all pending alerts
+  edit          Open config file in editor
+  update        Check and apply updates
+  restart       Disable → Enable (re-apply rules)
+  uninstall     Remove Loguard completely
+  help          Show this help
+
+Examples:
+  sudo loguard status
+  sudo loguard test
+  sudo loguard logs 50
+  sudo loguard enable
+  sudo loguard update
+
+Config: /etc/loguard/config.toml
+GitHub: https://github.com/Nowafen/loguard
 EOF
 }
 
@@ -198,18 +297,20 @@ main() {
     mkdir -p "$CONFIG_DIR" "/var/log/loguard"
 
     case "${1:-}" in
-        status|"")      show_status ;;
-        enable)         check_root; enable_alerts ;;
-        disable)        check_root; disable_alerts ;;
-        test)           check_root; telegram_test ;;
-        logs)           show_logs "${2:-}" ;;
-        queue)          show_queue ;;
-        clear-queue)    check_root; clear_queue ;;
-        edit)           check_root; edit_config_wizard ;;
-        restart)        check_root; disable_alerts; enable_alerts ;;
-        uninstall)      check_root; uninstall ;;
-        help|-h)        show_help ;;
-        *)              error "Unknown command: $1"; show_help; exit 1 ;;
+        status|"")          show_status ;;
+        enable)             check_root; enable_alerts ;;
+        disable)            check_root; disable_alerts ;;
+        test)               check_root; telegram_test ;;
+        logs)               show_logs "${2:-}" ;;
+        queue)              show_queue ;;
+        clear-queue)        check_root; clear_queue ;;
+        edit)               check_root; edit_config_wizard ;;
+        update)             check_root; update_loguard ;;
+        restart)            check_root; disable_alerts; enable_alerts ;;
+        version)            echo "Loguard v$VERSION" ;;
+        uninstall)          check_root; uninstall ;;
+        help|-h)            show_help ;;
+        *)                  error "Unknown command: $1"; echo; show_help; exit 1 ;;
     esac
 }
 
