@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.1"
+VERSION="1.0.2"
 INSTALL_DIR="/opt/loguard"
 CONFIG_DIR="/etc/loguard"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
@@ -221,13 +221,15 @@ telegram_test() {
     fi
 
     local msg="*Loguard Test Message*%0AHost: <code>$HOSTNAME</code>%0ATime: <code>$(date '+%Y-%m-%d %H:%M:%S')</code>%0AStatus: Working!"
-    
+
+    local url="https://api.telegram.org/bot$BOT_TOKEN/sendMessage"
     local response
     response=$(curl -s -w "%{http_code}" -m 10 \
         --data "chat_id=$CHAT_ID" \
         --data "text=$msg" \
-        --data "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" 2>/dev/null)
-    
+        --data "parse_mode=HTML" \
+        "$url" 2>/dev/null)
+
     local code="${response: -3}"
     if [[ "$code" == "200" ]]; then
         success "Test message sent successfully!"
