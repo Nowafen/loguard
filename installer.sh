@@ -154,11 +154,11 @@ finish_message() {
     echo
     echo -e "${BOLD}Next steps:${NC}"
     echo "   1. Configure Telegram settings:"
-    echo "      ${CYAN}sudo loguard edit${NC}"
+    echo "      sudo loguard edit"
     echo "   2. Test connection:"
-    echo "      ${CYAN}sudo loguard test${NC}"
+    echo "      sudo loguard test"
     echo "   3. Enable real-time alerts:"
-    echo "      ${CYAN}sudo loguard enable${NC}"
+    echo "      sudo loguard enable"
     echo
     echo -e "   To disable later: ${GRAY}sudo loguard disable${NC}"
     echo -e "   To remove completely: ${GRAY}sudo loguard uninstall${NC}"
