@@ -139,7 +139,7 @@ edit_config_wizard() {
                 read -p "Apply changes? [Y/n]: " confirm
                 [[ "$confirm" =~ ^[Nn]$ ]] && { warn "Changes discarded"; return; }
 
-                }
+                
                 save_config "$current_token" "$current_chat" "$current_host"
                 echo
                 success "Configuration saved successfully!"
