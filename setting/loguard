@@ -81,7 +81,6 @@ edit_config_wizard() {
     echo -e "Config file: ${YELLOW}$CONFIG_FILE${NC}"
     echo
 
-    # Force reload config (even if invalid)
     local current_token=""
     local current_chat=""
     local current_host=""
@@ -92,7 +91,6 @@ edit_config_wizard() {
         current_host=$(grep '^\s*hostname' "$CONFIG_FILE" | head -1 | cut -d '=' -f2- | xargs || echo "")
     fi
 
-    # Fallback to system hostname if empty
     [[ -z "$current_host" ]] && current_host="$(hostname)"
 
     while true; do
@@ -103,7 +101,7 @@ edit_config_wizard() {
         echo -e "${BLUE}Current Settings:${NC}"
         echo "1. Bot Token      → $(mask_token "$current_token")"
         echo "2. Chat ID        → ${current_chat:-"(not set)"}"
-        echo "3. Hostname       → ${current_host:-"(auto: $(hostname))"}"
+        echo "3. Hostname       → ${current_host}"
         echo
         echo -e "4. ${GREEN}Save & Exit${NC}"
         echo -e "5. ${RED}Exit without saving${NC}"
@@ -123,7 +121,7 @@ edit_config_wizard() {
             3)
                 read -p "Enter custom hostname (or leave empty for auto): " new_host
                 current_host="${new_host:-"$(hostname)"}"
-                [[ "$new_host" == "" ]] && echo "Hostname will use system default" || success "Hostname set to: $current_host"
+                [[ -z "$new_host" ]] && echo "Hostname will use system default" || success "Hostname set to: $current_host"
                 ;;
             4)
                 echo -e "${YELLOW}Final Configuration:${NC}"
@@ -139,7 +137,6 @@ edit_config_wizard() {
                 read -p "Apply changes? [Y/n]: " confirm
                 [[ "$confirm" =~ ^[Nn]$ ]] && { warn "Changes discarded"; return; }
 
-                
                 save_config "$current_token" "$current_chat" "$current_host"
                 echo
                 success "Configuration saved successfully!"
@@ -150,8 +147,7 @@ edit_config_wizard() {
                 warn "No changes saved"
                 return
                 ;;
-            ;;
-            *) 
+            *)
                 warn "Invalid option. Please try again."
                 ;;
         esac
