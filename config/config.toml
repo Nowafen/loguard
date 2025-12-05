@@ -1,15 +1,16 @@
 # Loguard Configuration
-# Copy to /etc/loguard/config.toml and edit
+# Edit using: sudo loguard edit
+# Get token from @BotFather
+# Get chat_id from @userinfobot
 
-bot_token = "712345678:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-chat_id   = "123456789"
+bot_token = ""
+chat_id   = ""
 
-# Optional: customize message format
-hostname  = "myserver.local"  # auto-detected if empty
+# Optional: leave empty to use system hostname
+hostname  = ""
 
-# Retry settings
-max_retries = 3
-retry_delay = 5
-
-# Queue file
-queue_file = "/var/log/loguard/pending_alerts.jsonl"
+# Advanced (no need to change)
+max_retries   = 3
+retry_delay   = 5
+queue_file    = "/var/log/loguard/pending_alerts.jsonl"
+log_file      = "/var/log/loguard/alert.log"

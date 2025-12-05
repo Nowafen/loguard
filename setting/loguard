@@ -26,12 +26,33 @@ check_root() {
     [[ $EUID -eq 0 ]] || { error "This command must be run as root (use sudo)"; exit 1; }
 }
 
+# Global variables for config status
+CONFIG_VALID=0
+CONFIG_MISSING=""
+
 load_config() {
-    [[ -f "$CONFIG_FILE" ]] || return 1
-    source <(grep -E '^(bot_token|chat_id|hostname) *=' "$CONFIG_FILE" | sed 's/ *= */=/g' 2>/dev/null || true)
-    BOT_TOKEN="${bot_token:-}"
-    CHAT_ID="${chat_id:-}"
-    HOSTNAME="${hostname:-}"
+    [[ -f "$CONFIG_FILE" ]] || { CONFIG_MISSING="Config file missing"; return 1; }
+
+    # Read values safely
+    local raw_token=$(grep '^\s*bot_token' "$CONFIG_FILE" | head -1 | cut -d '=' -f2- | xargs)
+    local raw_chat=$(grep '^\s*chat_id' "$CONFIG_FILE" | head -1 | cut -d '=' -f2- | xargs)
+    local raw_host=$(grep '^\s*hostname' "$CONFIG_FILE" | head -1 | cut -d '=' -f2- | xargs)
+
+    BOT_TOKEN="${raw_token:-}"
+    CHAT_ID="${raw_chat:-}"
+    HOSTNAME="${raw_host:-$(hostname)}"
+
+    # Validate required fields
+    if [[ -z "$BOT_TOKEN" ]]; then
+        CONFIG_MISSING="Bot Token is missing"
+        return 1
+    fi
+    if [[ -z "$CHAT_ID" ]]; then
+        CONFIG_MISSING="Chat ID is missing"
+        return 1
+    fi
+
+    CONFIG_VALID=1
     return 0
 }
 
@@ -175,17 +196,27 @@ last_alert() {
 }
 
 telegram_test() {
-    load_config || { error "Config not found or invalid"; return 1; }
-    [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]] || { error "bot_token or chat_id missing in config"; return 1; }
-    local msg="*Loguard Test*%0AHost: <code>$(hostname)</code>%0ATime: <code>$(date '+%Y-%m-%d %H:%M:%S')</code>"
+    check_root
+    if ! load_config; then
+        error "Cannot send test: $CONFIG_MISSING"
+        echo "Please run: sudo loguard edit"
+        return 1
+    fi
+
+    local msg="*Loguard Test Message*%0AHost: <code>$HOSTNAME</code>%0ATime: <code>$(date '+%Y-%m-%d %H:%M:%S')</code>%0AStatus: Working!"
+    
     local response
-    response=$(curl -s -w "%{http_code}" -m 10 --data "chat_id=$CHAT_ID" --data "text=$msg" --data "parse_mode=HTML" \
-       "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" 2>/dev/null)
-    local http_code="${response: -3}"
-    if [[ "$http_code" == "200" ]]; then
-        success "Test message sent! Check your Telegram."
+    response=$(curl -s -w "%{http_code}" -m 10 \
+        --data "chat_id=$CHAT_ID" \
+        --data "text=$msg" \
+        --data "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" 2>/dev/null)
+    
+    local code="${response: -3}"
+    if [[ "$code" == "200" ]]; then
+        success "Test message sent successfully!"
     else
-        error "Failed to send (HTTP $http_code). Check token/chat_id/internet."
+        error "Failed to send test message (HTTP $code)"
+        echo "Check your Bot Token and Chat ID"
     fi
 }
 
@@ -194,23 +225,27 @@ show_status() {
 
     if pam_status; then
         echo -e "Status:      ${GREEN}Enabled${NC}              [OK]"
-        echo -e "PAM Rules:   ${#PAM_ACTIVE[@]} active in ${#PAM_ACTIVE[@]} files"
+        echo -e "PAM Rules:   ${#PAM_ACTIVE[@]} active configuration(s)"
         for f in "${PAM_ACTIVE[@]}"; do
             echo -e "             ${GREEN}Success${NC} $f"
         done
         [[ ${#PAM_INACTIVE[@]} -gt 0 ]] && for f in "${PAM_INACTIVE[@]}"; do
-            echo -e "             ${GRAY}Skipped${NC} $f (not present or no rule)"
+            echo -e "             ${GRAY}Skipped${NC} $f"
         done
     else
         echo -e "Status:      ${RED}Disabled${NC}             [Paused]"
         echo -e "PAM Rules:   No active configuration found"
     fi
 
+    # Config status
     if load_config; then
         echo -e "Config:      $CONFIG_FILE          ${GREEN}Valid${NC}"
-        [[ -n "$BOT_TOKEN" && -n "$CHAT_ID" ]] && echo -e "Telegram:    ${GREEN}Configured${NC}" || echo -e "Telegram:    ${RED}Not configured${NC}"
+        echo -e "Telegram:    ${GREEN}Configured${NC}"
     else
-        echo -e "Config:      ${RED}Missing or invalid${NC}"
+        echo -e "Config:      $CONFIG_FILE          ${RED}Invalid${NC}"
+        echo -e "Telegram:    ${RED}Not configured${NC}"
+        echo -e "             ${YELLOW}Error: $CONFIG_MISSING${NC}"
+        echo -e "             Run: ${CYAN}sudo loguard edit${NC}"
     fi
 
     local pending=$(count_pending)
@@ -281,13 +316,29 @@ enable_alerts() {
 
 disable_alerts() {
     local removed=0
+    local total_touched=0
+
     for f in $PAM_FILES; do
         [[ ! -f "$f" ]] && continue
-        if sed -i '/loguard\|login-alert\.sh/d' "$f" 2>/dev/null; then
-            ((removed++))
-        fi
+        ((total_touched++))
+
+        # Count lines before deletion
+        local before=$(grep -c "login-alert\.sh" "$f" 2>/dev/null || echo 0)
+        sed -i '/loguard\|login-alert\.sh/d' "$f"
+        local after=$(grep -c "login-alert\.sh" "$f" 2>/dev/null || echo 0)
+
+        (( before > after )) && ((removed++))
     done
-    [[ $removed -gt 0 ]] && success "Loguard disabled (removed from $removed files)" || warn "Loguard was not active"
+
+    if [[ $removed -gt 0 ]]; then
+        success "Loguard disabled — rules removed from $removed configuration(s)"
+    else
+        if [[ $total_touched -eq 0 ]]; then
+            warn "No PAM files found to modify"
+        else
+            warn "Loguard was not active in any PAM configuration"
+        fi
+    fi
 }
 
 clear_queue() {
