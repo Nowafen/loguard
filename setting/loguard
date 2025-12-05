@@ -131,13 +131,23 @@ pam_status() {
 
     for f in $PAM_FILES; do
         [[ ! -f "$f" ]] && continue
-        if grep -q "^session.*pam_exec\.so.*login-alert\.sh" "$f" 2>/dev/null; then
+
+        # Check if file directly has our rule OR includes common-session (which we control)
+        if grep -q "^session.*pam_exec\.so.*login-alert\.sh" "$f" 2>/dev/null || \
+           grep -q "^@include.*common-session" "$f" 2>/dev/null; then
             PAM_ACTIVE+=("$f")
             ((found++))
         else
             PAM_INACTIVE+=("$f")
         fi
     done
+
+    # Always check common-session itself
+    if [[ -f "/etc/pam.d/common-session" ]] && \
+       grep -q "^session.*pam_exec\.so.*login-alert\.sh" "/etc/pam.d/common-session" 2>/dev/null; then
+        ((found++))
+    fi
+
     [[ $found -gt 0 ]]
 }
 
@@ -230,15 +240,43 @@ show_queue() {
 
 enable_alerts() {
     local line="session optional pam_exec.so stdout $INSTALL_DIR/login-alert.sh"
+    local target="/etc/pam.d/common-session"
+    local target_ni="/etc/pam.d/common-session-noninteractive"
+
     local added=0
-    for f in $PAM_FILES; do
-        [[ ! -f "$f" ]] && continue
-        sed -i '/loguard\|login-alert\.sh/d' "$f"
-        echo "# Loguard - Real-time login alerts" >> "$f"
-        echo "$line" >> "$f"
+
+    # Always try to add to common-session first (most important)
+    if [[ -f "$target" ]]; then
+        sed -i '/loguard\|login-alert\.sh/d' "$target"
+        echo "# Loguard - Real-time login alerts" >> "$target"
+        echo "$line" >> "$target"
         ((added++))
+    fi
+
+    # Also add to common-session-noninteractive if exists
+    if [[ -f "$target_ni" ]]; then
+        sed -i '/loguard\|login-alert\.sh/d' "$target_ni"
+        echo "# Loguard - Real-time login alerts" >> "$target_ni"
+        echo "$line" >> "$target_ni"
+        ((added++))
+    fi
+
+    # Now check all services — if they don't include common-session, add directly
+    for f in sshd login su sudo sudo-i lightdm gdm-password; do
+        local svc="/etc/pam.d/$f"
+        [[ ! -f "$svc" ]] && continue
+
+        if ! grep -q "^@include.*common-session" "$svc" 2>/dev/null && \
+           ! grep -q "^session.*pam_exec\.so.*login-alert\.sh" "$svc" 2>/dev/null; then
+            sed -i '/loguard\|login-alert\.sh/d' "$svc"
+            echo "# Loguard - Real-time login alerts" >> "$svc"
+            echo "$line" >> "$svc"
+            ((added++))
+        fi
     done
-    [[ $added -gt 0 ]] && success "Loguard enabled on $added PAM configurations" || warn "No PAM files were modified"
+
+    success "Loguard enabled — rules added to $added key configuration(s)"
+    echo "   Monitoring active for: SSH, Console, SU, SUDO, Graphical Login"
 }
 
 disable_alerts() {
