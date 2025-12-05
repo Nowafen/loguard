@@ -186,7 +186,7 @@ uninstall() { read -p "Remove Loguard completely? [y/N]: " a; [[ "$a" =~ ^[Yy]$ 
 
 show_help() {
     cat << EOF
-${BLUE}Loguard v$VERSION${NC} - Login Alerts to Telegram
+Loguard v$VERSION - Login Alerts to Telegram
 
 Commands: status | enable | disable | test | logs [n] | queue | clear-queue | edit | restart | uninstall | help
 Use: sudo loguard <command>
