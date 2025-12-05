@@ -81,16 +81,29 @@ edit_config_wizard() {
     echo -e "Config file: ${YELLOW}$CONFIG_FILE${NC}"
     echo
 
-    load_config
-    local current_token="$BOT_TOKEN"
-    local current_chat="$CHAT_ID"
-    local current_host="${HOSTNAME:-$(hostname)}"
+    # Force reload config (even if invalid)
+    local current_token=""
+    local current_chat=""
+    local current_host=""
+
+    if [[ -f "$CONFIG_FILE" ]]; then
+        current_token=$(grep '^\s*bot_token' "$CONFIG_FILE" | head -1 | cut -d '=' -f2- | xargs || echo "")
+        current_chat=$(grep '^\s*chat_id' "$CONFIG_FILE" | head -1 | cut -d '=' -f2- | xargs || echo "")
+        current_host=$(grep '^\s*hostname' "$CONFIG_FILE" | head -1 | cut -d '=' -f2- | xargs || echo "")
+    fi
+
+    # Fallback to system hostname if empty
+    [[ -z "$current_host" ]] && current_host="$(hostname)"
 
     while true; do
+        clear
+        echo -e "${CYAN}Loguard Configuration Wizard${NC}"
+        echo -e "Config file: ${YELLOW}$CONFIG_FILE${NC}"
+        echo
         echo -e "${BLUE}Current Settings:${NC}"
         echo "1. Bot Token      → $(mask_token "$current_token")"
         echo "2. Chat ID        → ${current_chat:-"(not set)"}"
-        echo "3. Hostname       → ${current_host:-"(auto: $(hostname)"}"
+        echo "3. Hostname       → ${current_host:-"(auto: $(hostname))"}"
         echo
         echo -e "4. ${GREEN}Save & Exit${NC}"
         echo -e "5. ${RED}Exit without saving${NC}"
@@ -101,46 +114,49 @@ edit_config_wizard() {
         case "$choice" in
             1)
                 read -p "Enter Bot Token (or press Enter to keep current): " new_token
-                [[ -n "$new_token" ]] && current_token="$new_token"
-                success "Bot Token updated"
+                [[ -n "$new_token" ]] && current_token="$new_token" && success "Bot Token updated"
                 ;;
             2)
                 read -p "Enter Chat ID (or press Enter to keep current): " new_chat
-                [[ -n "$new_chat" ]] && current_chat="$new_chat"
-                success "Chat ID updated"
+                [[ -n "$new_chat" ]] && current_chat="$new_chat" && success "Chat ID updated"
                 ;;
             3)
                 read -p "Enter custom hostname (or leave empty for auto): " new_host
-                current_host="${new_host:-}"
-                [[ -z "$current_host" ]] && echo "Hostname will use system default" || success "Hostname set to: $current_host"
+                current_host="${new_host:-"$(hostname)"}"
+                [[ "$new_host" == "" ]] && echo "Hostname will use system default" || success "Hostname set to: $current_host"
                 ;;
             4)
                 echo -e "${YELLOW}Final Configuration:${NC}"
                 echo "Bot Token : $(mask_token "$current_token")"
                 echo "Chat ID   : ${current_chat:-"(empty!)"}"
-                echo "Hostname  : ${current_host:-"(auto)"}"
+                echo "Hostname  : ${current_host}"
                 echo
-                [[ -z "$current_token" || -z "$current_chat" ]] && {
-                    warn "Bot Token and Chat ID are required!"
-                    read -p "Continue anyway? [y/N]: " force
-                    [[ ! "$force" =~ ^[Yy]$ ]] && continue
-                }
+                if [[ -z "$current_token" || -z "$current_chat" ]]; then
+                    warn "Bot Token and Chat ID are REQUIRED to receive alerts!"
+                    read -p "Save anyway? [y/N]: " force_save
+                    [[ ! "$force_save" =~ ^[Yy]$ ]] && continue
+                fi
                 read -p "Apply changes? [Y/n]: " confirm
                 [[ "$confirm" =~ ^[Nn]$ ]] && { warn "Changes discarded"; return; }
+
+                }
                 save_config "$current_token" "$current_chat" "$current_host"
                 echo
-                success "Configuration applied successfully!"
-                echo -e "${GREEN}Tip: Run 'sudo loguard test' to verify connection${NC}"
+                success "Configuration saved successfully!"
+                echo -e "${GREEN}Now run: sudo loguard test${NC}"
                 return
                 ;;
             5)
                 warn "No changes saved"
                 return
                 ;;
-            *) warn "Invalid option" ;;
+            ;;
+            *) 
+                warn "Invalid option. Please try again."
+                ;;
         esac
-        echo; read -p "Press Enter to continue..."
-        clear
+        echo
+        read -p "Press Enter to continue..." </dev/tty
     done
 }
 
