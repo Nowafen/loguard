@@ -25,7 +25,8 @@ GRAY='\033[0;37m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-start_time=$(date +%s.%N)
+# Start timer (simple seconds)
+start_time=$SECONDS
 
 banner() {
     clear
@@ -43,7 +44,7 @@ banner() {
     ░  ░    ░ ░        ░    ░           ░  ░   ░        ░    
                                                       ░      
 
-               Real-time Linux Login Alert to Telegram
+               LOGUARD - On-time Linux Login Alert to Telegram
 EOF
     echo -e "${NC}"
     echo -e "${BOLD}=======================================================${NC}"
@@ -51,33 +52,32 @@ EOF
 }
 
 step() {
-    echo -e "[${YELLOW}•${NC}] $1"
+    printf "[${YELLOW}•${NC}] %s\n" "$1"
 }
 
-success() {
-    echo -e "   ${GREEN}Success${NC} $1"
+success_step() {
+    printf "   ${GREEN}✓${NC} %s\n" "$1"
 }
 
 download_file() {
     local url="$1"
     local dest="$2"
     local name="$3"
-    echo -n "   [${YELLOW}Download${NC}] $name... "
-    local start=$(date +%s.%N)
-    if curl -fsSL "$url" -o "$dest" --silent; then
+    printf "   [${YELLOW}↓${NC}] %s... " "$name"
+    local start_sec=$SECONDS
+    if curl -fsSL --silent --show-error "$url" -o "$dest"; then
         local size=$(du -h "$dest" 2>/dev/null | cut -f1 || echo "?")
-        local elapsed=$(printf "%.1f" "$(echo "$(date +%s.%N) - $start" | bc -l 2>/dev/null || echo "0.0")")
-        echo -e "${GREEN}Success${NC} ${GRAY}($size, ${elapsed}s)${NC}"
+        local elapsed=$((SECONDS - start_sec))
+        printf "${GREEN}Success${NC} ${GRAY}($size, ${elapsed}s)${NC}\n"
     else
-        echo -e "${RED}Failed${NC}"
+        printf "${RED}Failed${NC}\n"
         exit 1
     fi
 }
 
 check_root() {
     step "Checking root privileges..."
-    [[ $EUID -eq 0 ]] || { echo -e "   ${RED}Failed${NC} This installer must be run as root (use sudo)"; exit 1; }
-    success "OK"
+    [[ $EUID -eq 0 ]] && success_step "OK" || { printf "   ${RED}Failed${NC} This installer must be run as root (use sudo)\n"; exit 1; }
 }
 
 detect_os() {
@@ -92,28 +92,40 @@ detect_os() {
     elif [[ -f /etc/rocky-release ]]; then OS="rhel"; OS_NAME="Rocky Linux"
     elif [[ -f /etc/fedora-release ]]; then OS="rhel"; OS_NAME="Fedora"
     else
-        echo -e "   ${RED}Failed${NC} Unsupported operating system"
+        printf "   ${RED}Failed${NC} Unsupported operating system\n"
         exit 1
     fi
-    success "$OS_NAME ($OS)"
+    success_step "$OS_NAME ($OS)"
 }
 
 install_dependencies() {
     step "Installing required packages (curl, jq)..."
     case "$OS" in
-        debian) apt update -qq >/dev/null && apt install -y curl jq -qq >/dev/null && success "done" ;;
-        rhel) (command -v dnf >/dev/null && dnf install -y curl jq -q >/dev/null) || (yum install -y curl jq -q >/dev/null 2>&1) && success "done" ;;
-        arch) pacman -Sy --noconfirm curl jq >/dev/null 2>&1 && success "done" ;;
+        debian)
+            apt-get update -qq >/dev/null 2>&1
+            apt-get install -y curl jq -qq >/dev/null 2>&1
+            ;;
+        rhel)
+            if command -v dnf >/dev/null; then
+                dnf install -y curl jq -q >/dev/null 2>&1
+            else
+                yum install -y curl jq -q >/dev/null 2>&1
+            fi
+            ;;
+        arch)
+            pacman -Sy --noconfirm curl jq --noconfirm >/dev/null 2>&1
+            ;;
     esac
+    success_step "done"
 }
 
 create_directories() {
     step "Creating directories..."
     mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$LOG_DIR" "$BIN_DIR" 2>/dev/null || true
-    echo "      → $INSTALL_DIR"
-    echo "      → $CONFIG_DIR"
-    echo "      → $LOG_DIR"
-    success "created"
+    printf "      → %s\n" "$INSTALL_DIR"
+    printf "      → %s\n" "$CONFIG_DIR"
+    printf "      → %s\n" "$LOG_DIR"
+    success_step "created"
 }
 
 download_components() {
@@ -124,17 +136,17 @@ download_components() {
 
     step "Setting executable permissions..."
     chmod +x "$INSTALL_DIR/loguard" "$INSTALL_DIR/login-alert.sh"
-    success "done"
+    success_step "done"
 
     step "Creating global command symlink..."
     ln -sf "$INSTALL_DIR/loguard" "$BIN_DIR/loguard" 2>/dev/null || true
-    success "/usr/local/bin/loguard → $INSTALL_DIR/loguard"
+    success_step "/usr/local/bin/loguard → $INSTALL_DIR/loguard"
 }
 
 finish_message() {
-    local total_time=$(printf "%.1f" "$(echo "$(date +%s.%N) - $start_time" | bc -l)")
+    local total_elapsed=$((SECONDS - start_time))
     echo
-    echo -e "   [${GREEN}Success${NC}] Installation completed in ${BOLD}${total_time}s${NC}"
+    printf "   [${GREEN}✓${NC}] Installation completed in ${BOLD}${total_elapsed}s${NC}\n"
     echo
     echo -e "${GREEN}${BOLD}Loguard installed successfully!${NC}"
     echo
@@ -149,8 +161,7 @@ finish_message() {
     echo "      ${CYAN}sudo loguard enable${NC}"
     echo
     echo -e "   To disable later: ${GRAY}sudo loguard disable${NC}"
-    echo -e "   To remove completely: ${GRAY}sudo loguard uninstallmelden "
-
+    echo -e "   To remove completely: ${GRAY}sudo loguard uninstall${NC}"
     echo
     echo -e "${CYAN}${BOLD}Thank you for using Loguard!${NC}"
     echo
