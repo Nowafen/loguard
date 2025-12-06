@@ -405,74 +405,48 @@ uninstall() {
     echo -e "   • All configuration files"
     echo -e "   • All logs and pending alerts"
     echo -e "   • All PAM rules"
-    echo -e "   • The loguard command"
+    echo -e "   • The loguard command (at the very end)"
     echo
     read -p "Are you sure you want to proceed? [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Uninstall cancelled."; return 0; }
 
     echo
-    echo -e "${YELLOW}Removing Loguard...${NC}"
+    echo -e "${YELLOW}Removing Loguard components...${NC}"
 
     local removed_pam=0
-    local pam_files_checked=0
 
-    # List of all possible files we might have modified
-    local pam_targets=(
-        "/etc/pam.d/common-session"
-        "/etc/pam.d/common-session-noninteractive"
-        "/etc/pam.d/sshd"
-        "/etc/pam.d/login"
-        "/etc/pam.d/su"
-        "/etc/pam.d/sudo"
-        "/etc/pam.d/sudo-i"
-        "/etc/pam.d/lightdm"
-        "/etc/pam.d/gdm-password"
-        "/etc/pam.d/gdm-launch-environment"
-        "/etc/pam.d/xfce4-screensaver"
-        "/etc/pam.d/lxdm"
-        "/etc/pam.d/sddm"
-    )
-
-    # Remove all Loguard rules from PAM files
-    for f in "${pam_targets[@]}"; do
+    # 1. Clean ALL possible PAM files (bruteforce search)
+    echo -e "   Scanning and cleaning /etc/pam.d/ ..."
+    for f in /etc/pam.d/*; do
         [[ ! -f "$f" ]] && continue
-        ((pam_files_checked++))
-
         if grep -q "loguard\|login-alert\.sh" "$f" 2>/dev/null; then
             sed -i '/loguard\|login-alert\.sh/d' "$f" 2>/dev/null
-            echo -e "   Cleaned PAM rules: $f"
+            echo -e "      Cleaned: $(basename "$f")"
             ((removed_pam++))
         fi
     done
 
-    rm -rf "$INSTALL_DIR" 2>/dev/null || true
-    [[ ! -d "$INSTALL_DIR" ]] && echo -e "   Removed installation directory: $INSTALL_DIR"
+    # 2. Remove all directories
+    rm -rf "$INSTALL_DIR" 2>/dev/null && echo -e "   Removed: $INSTALL_DIR"
+    rm -rf "$CONFIG_DIR" 2>/dev/null && echo -e "   Removed: $CONFIG_DIR"
+    rm -rf "/var/log/loguard" 2>/dev/null && echo -e "   Removed: /var/log/loguard"
 
-    rm -rf "$CONFIG_DIR" 2>/dev/null || true
-    [[ ! -d "$CONFIG_DIR" ]] && echo -e "   Removed configuration: $CONFIG_DIR"
+    # 3. Remove symlink (if exists)
+    rm -f "/usr/local/bin/loguard" 2>/dev/null
 
-    rm -rf "/var/log/loguard" 2>/dev/null || true
-    [[ ! -d "/var/log/loguard" ]] && echo -e "   Removed logs and queue: /var/log/loguard"
-
-    rm -f "/usr/local/bin/loguard" 2>/dev/null || true
-    [[ ! -f "/usr/local/bin/loguard" ]] && echo -e "   Removed command: /usr/local/bin/loguard"
-
-    # Remove any leftover symlinks
-    find /usr/local/bin -lname "$INSTALL_DIR*" -delete 2>/dev/null || true
-
+    # 4. Final message BEFORE self-delete
     echo
-    if [[ $removed_pam -gt 0 || $pam_files_checked -gt 0 ]]; then
-        echo -e "${GREEN}Success Loguard has been completely removed!${NC}"
-        [[ $removed_pam -gt 0 ]] && echo -e "   • $removed_pam PAM configuration(s) cleaned"
-        echo -e "   • All files and directories deleted"
-        echo -e "   • System restored to pre-install state"
-    else
-        echo -e "${GREEN}Success Loguard was not active — nothing to remove.${NC}"
-    fi
-
+    echo -e "${GREEN}Success Loguard has been completely removed!${NC}"
+    [[ $removed_pam -gt 0 ]] && echo -e "   • $removed_pam PAM file(s) cleaned"
+    echo -e "   • All files and directories deleted"
+    echo -e "   • System restored to pre-install state"
     echo
     echo -e "${CYAN}Thank you for using Loguard! Stay safe!${NC}"
     echo
+
+    # 5. Self-delete at the VERY END
+    rm -f "$0" 2>/dev/null || rm -f "/usr/local/bin/loguard" 2>/dev/null
+    echo -e "${GRAY}   → Self-destructed: $0${NC}"
 }
 
 show_help() {
