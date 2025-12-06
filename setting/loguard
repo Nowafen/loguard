@@ -405,48 +405,40 @@ uninstall() {
     echo -e "   • All configuration files"
     echo -e "   • All logs and pending alerts"
     echo -e "   • All PAM rules"
-    echo -e "   • The loguard command (at the very end)"
+    echo -e "   • The loguard command (including itself)"
     echo
     read -p "Are you sure you want to proceed? [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Uninstall cancelled."; return 0; }
 
     echo
-    echo -e "${YELLOW}Removing Loguard components...${NC}"
+    echo -e "${YELLOW}Removing Loguard...${NC}"
 
-    local removed_pam=0
-
-    # 1. Clean ALL possible PAM files (bruteforce search)
-    echo -e "   Scanning and cleaning /etc/pam.d/ ..."
+    # 1. Clean PAM rules
     for f in /etc/pam.d/*; do
-        [[ ! -f "$f" ]] && continue
+        [[ -f "$f" ]] || continue
         if grep -q "loguard\|login-alert\.sh" "$f" 2>/dev/null; then
             sed -i '/loguard\|login-alert\.sh/d' "$f" 2>/dev/null
-            echo -e "      Cleaned: $(basename "$f")"
-            ((removed_pam++))
+            echo "   Cleaned: $f"
         fi
     done
 
-    # 2. Remove all directories
-    rm -rf "$INSTALL_DIR" 2>/dev/null && echo -e "   Removed: $INSTALL_DIR"
-    rm -rf "$CONFIG_DIR" 2>/dev/null && echo -e "   Removed: $CONFIG_DIR"
-    rm -rf "/var/log/loguard" 2>/dev/null && echo -e "   Removed: /var/log/loguard"
+    # 2. Remove all files and directories
+    rm -rf /opt/loguard /etc/loguard /var/log/loguard 2>/dev/null || true
+    echo "   Removed: /opt/loguard, /etc/loguard, /var/log/loguard"
 
-    # 3. Remove symlink (if exists)
-    rm -f "/usr/local/bin/loguard" 2>/dev/null
+    # 3. Remove command and all symlinks
+    rm -f /usr/local/bin/loguard 2>/dev/null || true
+    find /usr/local/bin -lname "/opt/loguard*" -delete 2>/dev/null || true
+    echo "   Removed: loguard command"
 
-    # 4. Final message BEFORE self-delete
+    # 4. Final message
     echo
-    echo -e "${GREEN}Success Loguard has been completely removed!${NC}"
-    [[ $removed_pam -gt 0 ]] && echo -e "   • $removed_pam PAM file(s) cleaned"
-    echo -e "   • All files and directories deleted"
-    echo -e "   • System restored to pre-install state"
+    echo -e "${GREEN}Loguard has been completely removed!${NC}"
+    echo -e "   • All traces erased"
+    echo -e "   • System restored"
     echo
     echo -e "${CYAN}Thank you for using Loguard! Stay safe!${NC}"
     echo
-
-    # 5. Self-delete at the VERY END
-    rm -f "$0" 2>/dev/null || rm -f "/usr/local/bin/loguard" 2>/dev/null
-    echo -e "${GRAY}   → Self-destructed: $0${NC}"
 }
 
 show_help() {
