@@ -25,7 +25,7 @@ inline constexpr const char* kTamperLog       = "/var/log/loguard/tamper.log";
 inline constexpr const char* kRunDir          = "/run/loguard";
 inline constexpr const char* kPidFile         = "/run/loguard/loguard.pid";
 
-inline constexpr const char* kVersion         = "2.0.0";
+inline constexpr const char* kVersion         = "0.1.1";
 inline constexpr const char* kGithubRepo      = "OWNER/loguard"; // set by install.sh / maintainer
 
 } // namespace loguard::paths
