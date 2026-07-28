@@ -56,4 +56,18 @@ std::string sha256_file(const std::string& path);
 bool is_root();
 std::string hostname_str();
 
+// Short random hex id (8 bytes -> 16 hex chars), good enough to correlate
+// events for one login session. Not a full RFC4122 UUID -- deliberately
+// simpler since we only need uniqueness within one host's uptime.
+std::string gen_session_id();
+
+// Splits a string on a delimiter (keeps empty fields).
+std::vector<std::string> split(const std::string& s, char delim);
+
+// trim helpers (also useful outside config.cpp)
+std::string trim_str(const std::string& s);
+
+// seconds -> "2h 18m" / "45m 23s" / "12s" style duration string
+std::string format_duration(long seconds);
+
 } // namespace loguard::util

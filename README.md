@@ -56,8 +56,7 @@ Loguard v2 turns the original "login notifier" into a **Session Monitoring Agent
 ```bash
 # One-liner (downloads and installs from GitHub):
 curl -fsSL https://raw.githubusercontent.com/Nowafen/Loguard/main/install.sh | sudo bash
-```
-```bash
+
 # Or clone and install locally:
 git clone https://github.com/Nowafen/Loguard.git
 cd Loguard

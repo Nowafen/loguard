@@ -44,6 +44,9 @@ Config load_config(const std::string& path) {
         else if (key == "os_info") c.os_info = val;
         else if (key == "heartbeat_minutes") { try { c.heartbeat_minutes = std::stoi(val); } catch (...) {} }
         else if (key == "self_heal_pam") c.self_heal_pam = (val == "true" || val == "1");
+        else if (key == "process_poll_seconds") { try { c.process_poll_seconds = std::stoi(val); } catch (...) {} }
+        else if (key == "enable_geoip") c.enable_geoip = (val == "true" || val == "1");
+        else if (key == "high_risk_threshold") { try { c.high_risk_threshold = std::stoi(val); } catch (...) {} }
     }
 
     if (c.hostname.empty()) c.hostname = util::hostname_str();
@@ -64,6 +67,9 @@ bool save_config(const std::string& path, const Config& c) {
         out << "os_info   = \"" << c.os_info << "\"\n";
     out << "heartbeat_minutes = " << c.heartbeat_minutes << "\n";
     out << "self_heal_pam = " << (c.self_heal_pam ? "true" : "false") << "\n";
+    out << "process_poll_seconds = " << c.process_poll_seconds << "\n";
+    out << "enable_geoip = " << (c.enable_geoip ? "true" : "false") << "\n";
+    out << "high_risk_threshold = " << c.high_risk_threshold << "\n";
     return util::write_file_atomic(path, out.str(), 0600);
 }
 

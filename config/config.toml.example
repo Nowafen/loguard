@@ -1,24 +1,25 @@
 # Loguard configuration example
-# Copy this to /etc/loguard/config.toml
+# Copy this to /etc/loguard/config.toml and fill in real values, OR just
+# run `sudo loguard edit` after installation -- it writes this file for you.
 
-# Required: Telegram Bot Token (from @BotFather)
-bot_token = "YOUR_BOT_TOKEN_HERE"
+bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+chat_id   = "987654321"
+hostname  = "my-server"
+os_info   = "Ubuntu 24.04 LTS (x86_64)"
 
-# Required: Telegram Chat ID (from @userinfobot)
-chat_id = "YOUR_CHAT_ID_HERE"
-
-# Optional: Custom hostname shown in alerts
-# Default: system hostname
-hostname = "my-server"
-
-# Optional: OS info shown in alerts
-# Default: detected from /etc/os-release
-os_info = "Ubuntu 24.04 LTS"
-
-# Heartbeat interval in minutes (0 = disabled)
-# Default: 15
+# Heartbeat: send an "I'm alive" message every N minutes (0 = disabled)
 heartbeat_minutes = 15
 
-# Automatically restore PAM hook if tampered
-# Default: true
+# Auto-heal: if PAM rules get deleted/edited out, re-apply them automatically
 self_heal_pam = true
+
+# --- Session Monitor v2 ---
+
+# How often (seconds) the daemon scans `ps` for new processes per active session
+process_poll_seconds = 5
+
+# Look up country/city/ISP for remote login IPs via ip-api.com (free, no key, cached)
+enable_geoip = true
+
+# A session's risk score crossing this value fires an immediate HIGH RISK alert
+high_risk_threshold = 100

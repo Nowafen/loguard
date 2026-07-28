@@ -12,6 +12,11 @@ struct Config {
     bool self_heal_pam   = true;     // re-add PAM line if watchdog finds it missing
     bool valid = false;              // true once bot_token + chat_id are present
     std::string missing_reason;
+
+    // Session Monitor (v2) settings
+    int process_poll_seconds  = 5;    // how often to scan `ps` for new processes per active session
+    bool enable_geoip         = true; // look up country/city/ISP for remote IPs via ip-api.com
+    int high_risk_threshold   = 100;  // immediate alert fires once a session's score reaches this
 };
 
 // Returns Config with .valid=false and a human-readable .missing_reason

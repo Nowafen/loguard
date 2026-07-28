@@ -183,6 +183,53 @@ std::string hostname_str() {
     return "unknown-host";
 }
 
+std::string gen_session_id() {
+    unsigned char raw[8] = {0};
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, raw, sizeof(raw));
+        (void)n;
+        close(fd);
+    } else {
+        // Fallback: time + pid based, still unique enough for our purposes.
+        uint64_t seed = (uint64_t)time(nullptr) ^ ((uint64_t)getpid() << 16);
+        memcpy(raw, &seed, sizeof(raw) < sizeof(seed) ? sizeof(raw) : sizeof(seed));
+    }
+    char out[17];
+    for (int i = 0; i < 8; ++i) snprintf(out + i * 2, 3, "%02x", raw[i]);
+    return std::string(out, 16);
+}
+
+std::vector<std::string> split(const std::string& s, char delim) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == delim) { out.push_back(cur); cur.clear(); }
+        else cur += c;
+    }
+    out.push_back(cur);
+    return out;
+}
+
+std::string trim_str(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+std::string format_duration(long seconds) {
+    if (seconds < 0) seconds = 0;
+    long h = seconds / 3600;
+    long m = (seconds % 3600) / 60;
+    long s = seconds % 60;
+    std::ostringstream out;
+    if (h > 0) { out << h << "h " << m << "m"; }
+    else if (m > 0) { out << m << "m " << s << "s"; }
+    else { out << s << "s"; }
+    return out.str();
+}
+
 // ---- run_capture: fork/exec with an argv vector, no shell involved ----
 int run_capture(const std::vector<std::string>& argv,
                  std::string* out_stdout,
