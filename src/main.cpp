@@ -574,51 +574,91 @@ void cmd_uninstall() {
     std::cout << "Loguard has been completely removed.\n";
 }
 
-// ---------- update: GitHub Releases + semver + checksum verification ----------
+// ---------- update: rebuild-from-source (no GitHub Releases required) ----------
+//
+// The previous design checked GitHub Releases for a pre-built binary asset
+// (e.g. "loguard-linux-x86_64.tar.gz") plus a "SHA256SUMS" file. That only
+// works if a release pipeline is actually publishing those exact artifacts
+// on every tag -- this project never had one, so `loguard update` always
+// failed (either "no releases exist yet" or "no matching asset"). That
+// mismatch between what the code expected and what actually exists in the
+// repo was the real bug, not a one-off glitch.
+//
+// This version instead does what install.sh already does successfully:
+// download the branch's source tarball (which GitHub always serves, for
+// any commit, with zero release-publishing step required) and rebuild
+// locally with the same g++/gcc commands. Trust comes from fetching over
+// HTTPS from the declared repo and compiling it yourself -- the same trust
+// model install.sh already relies on -- rather than from a checksum file
+// that was never being published.
 namespace update_impl {
 
-// Returns every value of `"key":"..."` in order of appearance (not a real
-// JSON parser, but sufficient for GitHub's stable, well-ordered API output).
-std::vector<std::string> all_values(const std::string& json, const std::string& key) {
-    std::vector<std::string> out;
-    std::string needle = "\"" + key + "\":\"";
-    size_t pos = 0;
-    while (true) {
-        pos = json.find(needle, pos);
-        if (pos == std::string::npos) break;
-        pos += needle.size();
-        std::string val;
-        while (pos < json.size() && json[pos] != '"') {
-            if (json[pos] == '\\' && pos + 1 < json.size()) { pos++; }
-            val += json[pos++];
-        }
-        out.push_back(val);
-        pos++;
-    }
-    return out;
-}
-
-std::string detect_arch() {
+std::string fetch_remote_version(const std::string& repo, const std::string& branch) {
+    std::string url = "https://raw.githubusercontent.com/" + repo + "/" + branch + "/version.txt";
     std::string out;
-    util::run_capture({"uname", "-m"}, &out);
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
-    return out;
+    int rc = util::run_capture({"curl", "-fsSL", "--max-time", "15", url}, &out, 20);
+    if (rc != 0) return "";
+    return util::trim_str(out);
 }
 
-// Parses a `SHA256SUMS`-style file: lines of "<hex hash>  <filename>".
-// Returns the hash for the given filename, or "" if not found.
-std::string find_sha_for(const std::string& sums_content, const std::string& filename) {
-    std::istringstream in(sums_content);
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.find(filename) != std::string::npos) {
-            std::istringstream ls(line);
-            std::string hash;
-            ls >> hash;
-            return hash;
-        }
+bool download_source(const std::string& repo, const std::string& branch,
+                      const std::string& extract_dir, std::string& err) {
+    std::string tar_url = "https://github.com/" + repo + "/archive/refs/heads/" + branch + ".tar.gz";
+    std::string tmp_tar = "/tmp/loguard-update-src.tar.gz";
+    std::string out;
+
+    if (util::run_capture({"curl", "-fsSL", "--max-time", "30", "-o", tmp_tar, tar_url}, &out, 40) != 0) {
+        err = "Failed to download source tarball from " + tar_url;
+        return false;
     }
-    return "";
+    util::run_capture({"rm", "-rf", extract_dir}, &out);
+    util::make_dirs(extract_dir, 0700);
+    if (util::run_capture({"tar", "-xzf", tmp_tar, "-C", extract_dir, "--strip-components=1"}, &out, 30) != 0) {
+        err = "Failed to extract source tarball (corrupted download?)";
+        return false;
+    }
+    if (!util::file_exists(extract_dir + "/src/main.cpp") || !util::file_exists(extract_dir + "/src/pam_hook.c")) {
+        err = "Downloaded source tree is missing expected files -- refusing to build from it";
+        return false;
+    }
+    return true;
+}
+
+// Same file list as install.sh's "5. Build" step -- kept in one place would
+// be nicer, but install.sh is bash and this is C++, so the list is
+// duplicated deliberately (and both are short/stable enough that this is
+// an acceptable, explicit tradeoff rather than a shared-codegen system).
+bool build_from_source(const std::string& src_dir, const std::string& build_dir, std::string& err) {
+    std::vector<std::string> gpp = {
+        "g++", "-std=c++17", "-O2", "-o", build_dir + "/loguard",
+        src_dir + "/src/main.cpp", src_dir + "/src/util.cpp", src_dir + "/src/config.cpp",
+        src_dir + "/src/telegram.cpp", src_dir + "/src/queue.cpp", src_dir + "/src/pam.cpp",
+        src_dir + "/src/integrity.cpp", src_dir + "/src/session.cpp", src_dir + "/src/session_queue.cpp",
+        src_dir + "/src/geoip.cpp", src_dir + "/src/risk_engine.cpp",
+        src_dir + "/src/pattern_matcher.cpp", src_dir + "/src/process_monitor.cpp"
+    };
+    std::string out;
+    if (util::run_capture(gpp, &out, 180) != 0) {
+        err = "g++ build failed:\n" + out;
+        return false;
+    }
+    std::vector<std::string> gcc_cmd = {"gcc", "-O2", "-o", build_dir + "/loguard-notify", src_dir + "/src/pam_hook.c"};
+    if (util::run_capture(gcc_cmd, &out, 60) != 0) {
+        err = "gcc build failed:\n" + out;
+        return false;
+    }
+    if (!util::file_exists(build_dir + "/loguard") || !util::file_exists(build_dir + "/loguard-notify")) {
+        err = "Build reported success but binaries are missing -- aborting.";
+        return false;
+    }
+    return true;
+}
+
+bool install_binary_atomic(const std::string& from, const std::string& to) {
+    std::ifstream in(from, std::ios::binary);
+    if (!in.good()) return false;
+    std::ostringstream ss; ss << in.rdbuf();
+    return util::write_file_atomic(to, ss.str(), 0755);
 }
 
 } // namespace update_impl
@@ -626,98 +666,58 @@ std::string find_sha_for(const std::string& sums_content, const std::string& fil
 void cmd_update() {
     require_root("loguard update");
     using namespace update_impl;
+    const std::string branch = "main";
 
     std::cout << "Checking for updates (current: v" << paths::kVersion << ")...\n";
-    std::string api_url = std::string("https://api.github.com/repos/") + paths::kGithubRepo + "/releases/latest";
-    std::string json;
-    int rc = util::run_capture({"curl", "-fsSL", "-H", "Accept: application/vnd.github+json", api_url}, &json, 20);
-    if (rc != 0 || json.empty()) {
-        std::cerr << "Could not reach GitHub Releases API. Check network connectivity.\n";
+    std::string remote_version = fetch_remote_version(paths::kGithubRepo, branch);
+    if (remote_version.empty()) {
+        std::cerr << "Could not read version.txt from https://github.com/" << paths::kGithubRepo
+                   << " (" << branch << "). Check network connectivity and that the repo/branch exist.\n";
         std::exit(1);
     }
 
-    auto tag = util::json_field(json, "tag_name");
-    if (!tag) { std::cerr << "Unexpected response from GitHub (no tag_name found).\n"; std::exit(1); }
-    std::string remote_version = *tag;
-    if (!remote_version.empty() && remote_version[0] == 'v') remote_version.erase(0, 1);
-
-    if (util::semver_compare(remote_version, paths::kVersion) <= 0) {
-        std::cout << "You are up to date (v" << paths::kVersion << ").\n";
+    int cmp = util::semver_compare(remote_version, paths::kVersion);
+    if (cmp <= 0) {
+        std::cout << "You are up to date (v" << paths::kVersion << ", remote is v" << remote_version << ").\n";
         return;
     }
 
     std::cout << "New version available: v" << remote_version << " (current: v" << paths::kVersion << ")\n";
-    std::cout << "Proceed with update? [y/N]: ";
+    std::cout << "This will download the source and rebuild locally with g++/gcc.\n";
+    std::cout << "Proceed? [y/N]: ";
     std::string ans; std::getline(std::cin, ans);
     if (ans != "y" && ans != "Y") { std::cout << "Update cancelled.\n"; return; }
 
-    std::string arch = detect_arch();
-    std::string asset_name = "loguard-linux-" + arch + ".tar.gz";
+    std::string extract_dir = "/tmp/loguard-update-src";
+    std::string build_dir = "/tmp/loguard-update-build";
+    std::string err;
 
-    auto names = all_values(json, "name");
-    auto urls = all_values(json, "browser_download_url");
-    std::string asset_url, sums_url;
-    for (size_t i = 0; i < names.size() && i < urls.size(); ++i) {
-        if (names[i] == asset_name) asset_url = urls[i];
-        if (names[i] == "SHA256SUMS") sums_url = urls[i];
+    std::cout << "Downloading source...\n";
+    if (!download_source(paths::kGithubRepo, branch, extract_dir, err)) {
+        std::cerr << err << "\n"; std::exit(1);
     }
-    if (asset_url.empty() || sums_url.empty()) {
-        std::cerr << "No release asset found for this architecture (" << arch << ").\n";
-        std::cerr << "Expected an asset named '" << asset_name << "' plus 'SHA256SUMS' on the release.\n";
+
+    std::cout << "Building (this can take a few seconds)...\n";
+    util::make_dirs(build_dir, 0700);
+    if (!build_from_source(extract_dir, build_dir, err)) {
+        std::cerr << err << "\n";
+        std::cerr << "Your currently installed binaries were NOT touched.\n";
         std::exit(1);
     }
 
-    std::string tmp_tar = "/tmp/loguard-update.tar.gz";
-    std::string tmp_sums = "/tmp/loguard-update.sha256sums";
     std::string out;
-    if (util::run_capture({"curl", "-fsSL", "-o", tmp_tar, asset_url}, &out, 60) != 0) {
-        std::cerr << "Download failed: " << asset_name << "\n"; std::exit(1);
-    }
-    if (util::run_capture({"curl", "-fsSL", "-o", tmp_sums, sums_url}, &out, 30) != 0) {
-        std::cerr << "Download failed: SHA256SUMS\n"; std::exit(1);
-    }
-
-    std::string sums_content;
-    { std::ifstream in(tmp_sums); std::ostringstream ss; ss << in.rdbuf(); sums_content = ss.str(); }
-    std::string expected = find_sha_for(sums_content, asset_name);
-    std::string actual = util::sha256_file(tmp_tar);
-    if (expected.empty() || expected != actual) {
-        std::cerr << "Checksum verification FAILED for " << asset_name << ".\n";
-        std::cerr << "Refusing to install a binary whose checksum does not match the published SHA256SUMS.\n";
-        std::cerr << "This can mean a corrupted download, a network tamperer, or a compromised release --\n";
-        std::cerr << "in all three cases the safe thing to do is stop here.\n";
-        std::exit(1);
-    }
-    std::cout << "Checksum verified OK (" << actual.substr(0, 16) << "...)\n";
-
-    std::string extract_dir = "/tmp/loguard-update-extract";
-    util::run_capture({"rm", "-rf", extract_dir}, &out);
-    util::make_dirs(extract_dir, 0700);
-    if (util::run_capture({"tar", "-xzf", tmp_tar, "-C", extract_dir}, &out, 30) != 0) {
-        std::cerr << "Failed to extract update archive.\n"; std::exit(1);
-    }
-
-    auto copy_binary_atomic = [](const std::string& from, const std::string& to) -> bool {
-        std::ifstream in(from, std::ios::binary);
-        if (!in.good()) return false;
-        std::ostringstream ss; ss << in.rdbuf();
-        return util::write_file_atomic(to, ss.str(), 0755);
-    };
-
-    std::string new_main = extract_dir + "/loguard";
-    std::string new_hook = extract_dir + "/loguard-notify";
-    if (!util::file_exists(new_main) || !util::file_exists(new_hook)) {
-        std::cerr << "Update archive did not contain the expected binaries.\n"; std::exit(1);
-    }
-
     util::run_capture({"systemctl", "stop", "loguard.service"}, &out);
-    bool ok1 = copy_binary_atomic(new_main, paths::kMainBinary);
-    bool ok2 = copy_binary_atomic(new_hook, paths::kHookBinary);
+    bool ok1 = install_binary_atomic(build_dir + "/loguard", paths::kMainBinary);
+    bool ok2 = install_binary_atomic(build_dir + "/loguard-notify", paths::kHookBinary);
     if (!ok1 || !ok2) {
-        std::cerr << "Failed to install new binaries (permissions?). Aborting.\n"; std::exit(1);
+        std::cerr << "Build succeeded but installing the new binaries failed (permissions?).\n";
+        std::cerr << "The daemon has been left stopped -- run `sudo systemctl start loguard` "
+                      "once this is resolved.\n";
+        std::exit(1);
     }
     integrity::save_manifest();
     util::run_capture({"systemctl", "start", "loguard.service"}, &out);
+    util::run_capture({"rm", "-rf", extract_dir, build_dir}, &out);
 
     std::cout << "Updated to v" << remote_version << ". Run `loguard status` to confirm.\n";
 }
@@ -780,8 +780,11 @@ COMMANDS
                        This is what the system timer runs every minute;
                        you can also run it manually any time.
 
-  update              Checks GitHub Releases for a newer version, verifies
-                       its checksum, and replaces the binary atomically.
+  update              Compares your version against version.txt on the
+                       main branch; if newer, downloads the source and
+                       rebuilds locally with g++/gcc (same as install.sh),
+                       then swaps the binaries atomically. No GitHub
+                       Release/prebuilt asset is required.
                        Requires root.
 
   restart             Re-applies the PAM hook (disable, then enable) --
