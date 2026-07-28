@@ -5,12 +5,20 @@
 #include "queue.hpp"
 #include "pam.hpp"
 #include "integrity.hpp"
+#include "session.hpp"
+#include "session_queue.hpp"
+#include "geoip.hpp"
+#include "risk_engine.hpp"
+#include "pattern_matcher.hpp"
+#include "process_monitor.hpp"
 
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <map>
+#include <set>
 #include <algorithm>
 #include <csignal>
 #include <cstring>
@@ -122,11 +130,190 @@ void process_queue_once(const Config& cfg) {
     }
 }
 
+// ================= Session Monitor (v2) =================
+//
+// Active sessions live only in this process's memory while the daemon is
+// up (kept simple on purpose -- see README "Known limitations"). Two
+// timers drive it: handle_session_events() drains session_start/
+// session_end events written by the PAM hook, and poll_active_sessions()
+// periodically scans `ps` for new child processes of each active session,
+// running them through the pattern matcher + risk engine.
+
+std::map<std::string, session::Session> g_sessions;
+std::map<std::string, std::set<int>> g_known_pids;
+std::set<std::string> g_high_risk_alerted;
+
+// Sends `html` now; if delivery fails, falls back to the retry queue so a
+// blip in network connectivity never silently drops a session alert.
+void send_or_queue(const Config& cfg, const std::string& html,
+                    const std::string& user, const std::string& service) {
+    if (!cfg.valid) return;
+    bool ok = telegram::send_message(cfg.bot_token, cfg.chat_id, html);
+    util::log_line(paths::kAlertLog, std::string(ok ? "SENT  " : "FAILED") +
+                    " | " + user + " | " + service);
+    if (!ok) {
+        queue::Event e;
+        e.ts = time(nullptr);
+        e.user = user; e.service = service; e.from = "-"; e.tty = "-";
+        e.msg = "(session alert, see html_msg)";
+        e.html_msg = html;
+        queue::push(paths::kQueueFile, e);
+    }
+}
+
+void log_session_line(const std::string& line) {
+    util::log_line(paths::kSessionLog, line);
+}
+
+void apply_login_risk(session::Session& s) {
+    using namespace loguard::risk;
+    switch (s.type) {
+        case session::SessionType::InteractiveSSH: add(s, "SSH Login", kSshLogin); break;
+        case session::SessionType::ConsoleLogin:
+        case session::SessionType::GraphicalLogin: add(s, "Console Login", kConsoleLogin); break;
+        case session::SessionType::PrivilegeEscalation: add(s, "sudo", kSudo); s.privilege_escalation = true; break;
+        case session::SessionType::UserSwitch: add(s, "su", kSu); break;
+        default: break;
+    }
+    if (s.remote && s.geo_looked_up && !s.country_code.empty() &&
+        risk::is_new_country(s.user, s.country_code)) {
+        add(s, "New Country (" + s.country + ")", kNewCountrySeen);
+    }
+}
+
+void handle_session_events(const Config& cfg) {
+    for (auto& ev : session_queue::drain()) {
+        if (ev.type == "session_start") {
+            session::Session s;
+            s.id = ev.session_id;
+            auto ti = session::classify(ev.service, ev.tty);
+            s.type = ti.type; s.type_label = ti.label; s.type_emoji = ti.emoji; s.alertable = ti.alertable;
+            s.user = ev.user; s.uid = (int)ev.uid; s.gid = (int)ev.gid; s.group_name = ev.group;
+            s.hostname = ev.hostname; s.source_ip = ev.source_ip; s.remote = ev.remote;
+            s.auth_method = ev.auth_method; s.service = ev.service; s.tty = ev.tty;
+            s.shell = ev.shell; s.home = ev.home; s.cwd = ev.home; s.interactive = ev.interactive;
+            s.login_time = ev.ts;
+            s.add_timeline("Login", ev.ts);
+
+            if (s.remote && cfg.enable_geoip) {
+                auto geo = geoip::lookup(s.source_ip);
+                if (geo.ok && !geo.is_private) {
+                    s.country = geo.country; s.country_code = geo.country_code;
+                    s.city = geo.city; s.isp = geo.isp; s.geo_looked_up = true;
+                }
+            }
+
+            apply_login_risk(s);
+
+            log_session_line("START " + s.id + " | " + s.type_label + " | user=" + s.user +
+                              " tty=" + s.tty + " ip=" + s.source_ip + " risk=" + std::to_string(s.risk_score()));
+
+            if (s.alertable) {
+                send_or_queue(cfg, s.build_initial_alert_html(), s.user, s.service);
+            }
+
+            g_sessions[s.id] = std::move(s);
+            g_known_pids[ev.session_id] = {};
+
+        } else if (ev.type == "session_end") {
+            auto it = g_sessions.find(ev.session_id);
+            if (it == g_sessions.end()) continue; // daemon restarted mid-session, or already closed
+            session::Session& s = it->second;
+            s.logout_time = ev.ts;
+            s.add_timeline("Logout", ev.ts);
+
+            log_session_line("END   " + s.id + " | duration=" + s.duration_str() +
+                              " risk=" + std::to_string(s.risk_score()) + " (" + s.risk_label() + ")");
+
+            if (s.alertable) {
+                send_or_queue(cfg, s.build_summary_html(), s.user, s.service);
+            }
+
+            g_sessions.erase(it);
+            g_known_pids.erase(ev.session_id);
+            g_high_risk_alerted.erase(ev.session_id);
+        }
+    }
+}
+
+void poll_active_sessions(const Config& cfg) {
+    if (g_sessions.empty()) return;
+    auto all_procs = procmon::list_processes();
+
+    for (auto& [id, s] : g_sessions) {
+        auto& known = g_known_pids[id];
+        auto fresh = procmon::poll_session(all_procs, s.tty, s.user, known);
+
+        for (auto& p : fresh) {
+            session::ProcRecord rec;
+            rec.ts = time(nullptr); rec.pid = p.pid; rec.ppid = p.ppid;
+            rec.comm = p.comm; rec.args = p.args;
+            s.processes.push_back(rec);
+
+            auto match = pattern::classify_command(p.comm, p.args, s.shell);
+            if (match.category == pattern::Category::None) continue;
+
+            s.add_timeline(p.args.empty() ? p.comm : p.args);
+
+            if (match.category == pattern::Category::ReverseShell) {
+                risk::add(s, "Reverse Shell", match.risk_points);
+                s.suspicious_count++;
+                util::log_line(paths::kSuspiciousLog, "REVERSE-SHELL | session=" + id +
+                                " user=" + s.user + " cmd=" + p.args);
+                std::ostringstream html;
+                html << "🔴 <b>REVERSE SHELL DETECTED</b> ⚠️\n━━━━━━━━━━━━━━━━━━━━\n"
+                     << "🆔 <code>" << id << "</code>\n👤 " << s.user << "\n"
+                     << "❌ <code>" << p.args << "</code>\n"
+                     << "📍 PID: " << p.pid << "\n━━━━━━━━━━━━━━━━━━━━\n"
+                     << "Risk: 🔴 HIGH (+" << match.risk_points << ", total " << s.risk_score() << ")";
+                send_or_queue(cfg, html.str(), s.user, s.service);
+
+            } else if (match.category == pattern::Category::PrivilegeEscalation) {
+                s.privilege_escalation = true;
+                risk::add(s, match.reason, match.risk_points);
+                std::ostringstream html;
+                html << "🔴 <b>Privilege Escalation</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                     << "🆔 <code>" << id << "</code>\n👤 " << s.user << "\n"
+                     << "⬆️ <code>" << p.args << "</code>\n📟 " << s.tty
+                     << "\n━━━━━━━━━━━━━━━━━━━━\nRisk: +" << match.risk_points
+                     << " (total " << s.risk_score() << ")";
+                send_or_queue(cfg, html.str(), s.user, s.service);
+
+            } else { // Suspicious
+                s.suspicious_count++;
+                risk::add(s, match.reason, match.risk_points);
+                util::log_line(paths::kSuspiciousLog, "SUSPICIOUS | session=" + id +
+                                " user=" + s.user + " cmd=" + p.args);
+                std::ostringstream html;
+                html << "⚠️ <b>Suspicious Process</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                     << "🆔 <code>" << id << "</code>\n👤 " << s.user << "\n"
+                     << "📋 <code>" << p.args << "</code>\n📍 PID: " << p.pid
+                     << "\n━━━━━━━━━━━━━━━━━━━━\nRisk: +" << match.risk_points
+                     << " (total " << s.risk_score() << ")";
+                send_or_queue(cfg, html.str(), s.user, s.service);
+            }
+
+            if (risk::crossed_high_risk(s) && !g_high_risk_alerted.count(id)) {
+                g_high_risk_alerted.insert(id);
+                std::ostringstream html;
+                html << "🔴 <b>HIGH RISK SESSION</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                     << "🆔 <code>" << id << "</code>\n👤 " << s.user
+                     << "\nScore: " << s.risk_score() << " (threshold "
+                     << cfg.high_risk_threshold << ")\n"
+                     << "This session has accumulated multiple risk signals -- review immediately.";
+                send_or_queue(cfg, html.str(), s.user, s.service);
+            }
+        }
+    }
+}
+
 // ---------- daemon main loop ----------
 int cmd_daemon() {
     require_root("loguard daemon");
     util::make_dirs(paths::kStateDir, 0700);
     util::make_dirs(paths::kLogDir, 0700);
+    util::make_dirs(paths::kSessionsDir, 0700);
+    util::make_dirs(paths::kSessionByTtyDir, 0700);
     write_pidfile();
 
     std::signal(SIGTERM, handle_signal);
@@ -134,13 +321,19 @@ int cmd_daemon() {
 
     util::log_line(paths::kAlertLog, "loguardd started (pid " + std::to_string(getpid()) + ")");
 
-    time_t last_heartbeat = 0, last_check = 0;
+    time_t last_heartbeat = 0, last_check = 0, last_session_poll = 0;
     while (!g_stop) {
         Config cfg = load_config(paths::kConfigFile);
 
         process_queue_once(cfg);
+        handle_session_events(cfg);
 
         time_t now = time(nullptr);
+        int poll_every = cfg.process_poll_seconds > 0 ? cfg.process_poll_seconds : 5;
+        if (now - last_session_poll >= poll_every) {
+            poll_active_sessions(cfg);
+            last_session_poll = now;
+        }
         if (cfg.valid && cfg.heartbeat_minutes > 0 &&
             now - last_heartbeat >= cfg.heartbeat_minutes * 60) {
             std::string html = "<b>Loguard heartbeat</b>\nHost: <code>" + cfg.hostname +
@@ -238,6 +431,18 @@ void print_queue() {
     if (events.size() > 5) std::cout << "  ... and " << (events.size() - 5) << " more.\n";
 }
 
+void print_sessions(int n) {
+    // The CLI is a short-lived process and the daemon's active-session map
+    // lives only in loguardd's memory, so this reads the session log
+    // (every start/end line the daemon has written) rather than live state.
+    auto lines = util::read_lines(paths::kSessionLog);
+    if (lines.empty()) { std::cout << "No session activity recorded yet.\n"; return; }
+    int start = std::max(0, (int)lines.size() - n);
+    std::cout << "Last " << (lines.size() - start) << " session event(s) "
+                 "(run on the host itself; for live state use the Telegram alerts):\n";
+    for (int i = start; i < (int)lines.size(); ++i) std::cout << lines[i] << "\n";
+}
+
 // ---------- CLI: edit wizard ----------
 void edit_wizard() {
     Config cfg = load_config(paths::kConfigFile);
@@ -301,6 +506,8 @@ void cmd_enable() {
     require_root("loguard enable");
     util::make_dirs(paths::kStateDir, 0700);
     util::make_dirs(paths::kLogDir, 0700);
+    util::make_dirs(paths::kSessionsDir, 0700);
+    util::make_dirs(paths::kSessionByTtyDir, 0700);
     int n = pam::enable();
     integrity::save_manifest();
     std::string out;
@@ -557,6 +764,10 @@ COMMANDS
                        (e.g. because the network was down) and preview the
                        first few.
 
+  sessions [n]        Show the last n session start/end log lines
+                       (default 40) -- classification, risk score, and
+                       duration for every tracked session on this host.
+
   clear-queue         Permanently discard all pending (undelivered) alerts.
                        Asks for confirmation. Requires root.
 
@@ -590,13 +801,23 @@ TELEGRAM SETUP (one-time, before `loguard edit`)
   2. Start a chat with your new bot: /start
   3. Message @userinfobot to get your numeric Chat ID
 
-HOW IT WORKS
-  - A tiny hook (loguard-notify) fires on every login via PAM and writes
-    the event to a local queue file -- this never touches the network, so
-    a slow/offline connection never delays your login.
-  - The background daemon (loguardd) delivers the queue to Telegram, with
-    automatic retry, and sends a periodic "still alive" heartbeat so a
-    silent shutdown is itself visible (a gap in heartbeats means look here).
+HOW IT WORKS (Session Monitor v2)
+  - A tiny hook (loguard-notify) fires on PAM session open AND close and
+    writes a session_start/session_end event to a local file -- this never
+    touches the network, so a slow/offline connection never delays login.
+  - Every session is classified (Interactive SSH, Console, Privilege
+    Escalation, User Switch, System Session, Background Service) with a
+    unique Session ID; pure system housekeeping (cron/systemd) is logged
+    but never sent as a Telegram alert.
+  - The daemon (loguardd) polls `ps` every few seconds for each active
+    session's new child processes (matched by TTY + user), checks them
+    against a suspicious-binary list and reverse-shell patterns, and
+    raises a Risk Score using the rules in risk_engine.hpp.
+  - Remote logins are enriched with GeoIP (country/city/ISP via
+    ip-api.com, cached locally) and get a "new country" risk bonus the
+    first time a user logs in from a given country.
+  - At logout, a full Session Summary is sent: duration, timeline,
+    processes seen, privilege escalation flag, and the final risk score.
   - A separate watchdog pass (`loguard check`, run every minute via a
     systemd timer independent of the daemon) verifies the daemon, the PAM
     rules, and the binaries themselves haven't been tampered with, and
@@ -606,6 +827,10 @@ HOW IT WORKS
     the extreme, wipe the disk). What this design guarantees is that
     quietly disabling alerts without a trace is hard and, in almost every
     realistic case, itself triggers an alert before it succeeds.
+  - NOT implemented in this version: file-integrity monitoring (e.g.
+    /etc/passwd, authorized_keys changes) and network-connection
+    monitoring. Both are reserved as a future file-monitor / net-monitor
+    module (see risk_engine.hpp for the already-reserved point values).
 
 FILE LOCATIONS
   Config:            /etc/loguard/config.toml
@@ -613,7 +838,11 @@ FILE LOCATIONS
   Integrity hashes:   /etc/loguard/integrity.sha256
   Alert log:          /var/log/loguard/alert.log
   Tamper/health log:  /var/log/loguard/tamper.log
+  Session log:        /var/log/loguard/sessions.log
+  Suspicious log:     /var/log/loguard/suspicious.log
   Pending queue:      /var/lib/loguard/queue.jsonl
+  Session events:     /var/lib/loguard/sessions/events.jsonl
+  GeoIP cache:        /var/lib/loguard/sessions/geo_cache.jsonl
   Daemon binary:      /opt/loguard/bin/loguard
   PAM hook binary:    /opt/loguard/bin/loguard-notify
   CLI:                /usr/local/bin/loguard (symlink)
@@ -637,6 +866,13 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "queue") { print_queue(); return 0; }
+    if (cmd == "sessions") {
+        int n = 40;
+        if (argc > 2) { try { n = std::stoi(argv[2]); } catch (...) {} }
+        if (n > 500) n = 500;
+        print_sessions(n);
+        return 0;
+    }
     if (cmd == "clear-queue") {
         require_root("loguard clear-queue");
         std::cout << "Clear all pending alerts? This cannot be undone [y/N]: ";

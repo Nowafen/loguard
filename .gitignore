@@ -1,1 +1,14 @@
+# Build artifacts
 build/
+bin/
+*.o
+*.obj
+
+# Editor/OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Never commit real secrets if you test-generate a config locally
+config/config.toml

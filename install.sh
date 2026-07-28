@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-REPO="Nowafen/Loguard"          # set to your actual GitHub owner/repo
+REPO="Nowafen/Loguard"
 BRANCH="main"
 CLEANUP_DIRS=()
 
@@ -78,24 +78,25 @@ log "Init system: $INIT_SYSTEM"
 # 3. Install build dependencies (curl + C/C++ toolchain)
 # ---------------------------------------------------------------------------
 install_deps() {
-    if command -v curl >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1 && command -v make >/dev/null 2>&1; then
-        log "curl/gcc/g++/make already present -- skipping package installation."
+    if command -v curl >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1 && command -v make >/dev/null 2>&1 && command -v ps >/dev/null 2>&1; then
+        log "curl/gcc/g++/make/ps already present -- skipping package installation."
         return
     fi
-    log "Installing dependencies (curl, gcc, g++, make)..."
+    log "Installing dependencies (curl, gcc, g++, make, ps)..."
     case "$PKG_MGR" in
         apt)
             apt-get update -y -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates gcc g++ make
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates gcc g++ make procps
             ;;
-        dnf)    dnf install -y -q curl gcc gcc-c++ make ;;
-        yum)    yum install -y -q curl gcc gcc-c++ make ;;
-        zypper) zypper --non-interactive install curl gcc gcc-c++ make ;;
-        pacman) pacman -Sy --noconfirm --needed curl gcc make ;;
-        apk)    apk add --no-cache curl gcc g++ make musl-dev ;;
+        dnf)    dnf install -y -q curl gcc gcc-c++ make procps-ng ;;
+        yum)    yum install -y -q curl gcc gcc-c++ make procps-ng ;;
+        zypper) zypper --non-interactive install curl gcc gcc-c++ make procps ;;
+        pacman) pacman -Sy --noconfirm --needed curl gcc make procps-ng ;;
+        apk)    apk add --no-cache curl gcc g++ make musl-dev procps ;;
         *)
             command -v curl >/dev/null 2>&1 || die "curl is required and no package manager was detected -- install it manually."
             command -v g++  >/dev/null 2>&1 || die "g++ is required and no package manager was detected -- install it manually."
+            command -v ps   >/dev/null 2>&1 || die "ps (procps) is required for Session Monitor process tracking -- install it manually."
             ;;
     esac
 }
@@ -128,7 +129,10 @@ log "Building Loguard from source..."
 g++ -std=c++17 -O2 -o "$BUILD_DIR/loguard" \
     "$SRC_DIR"/src/main.cpp "$SRC_DIR"/src/util.cpp "$SRC_DIR"/src/config.cpp \
     "$SRC_DIR"/src/telegram.cpp "$SRC_DIR"/src/queue.cpp "$SRC_DIR"/src/pam.cpp \
-    "$SRC_DIR"/src/integrity.cpp
+    "$SRC_DIR"/src/integrity.cpp \
+    "$SRC_DIR"/src/session.cpp "$SRC_DIR"/src/session_queue.cpp \
+    "$SRC_DIR"/src/geoip.cpp "$SRC_DIR"/src/risk_engine.cpp \
+    "$SRC_DIR"/src/pattern_matcher.cpp "$SRC_DIR"/src/process_monitor.cpp
 gcc -O2 -o "$BUILD_DIR/loguard-notify" "$SRC_DIR"/src/pam_hook.c
 log "Build succeeded."
 
@@ -143,6 +147,8 @@ ln -sf /opt/loguard/bin/loguard /usr/local/bin/loguard
 install -d -m 0700 /etc/loguard
 install -d -m 0700 /var/lib/loguard
 install -d -m 0700 /var/log/loguard
+install -d -m 0700 /var/lib/loguard/sessions
+install -d -m 0700 /var/lib/loguard/sessions/by_tty
 
 case "$INIT_SYSTEM" in
     systemd)
