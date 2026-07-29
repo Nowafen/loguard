@@ -3,6 +3,7 @@
 
 Loguard is a minimal, tamper-resistant login monitor for Linux that delivers **instant Telegram notifications** whenever anyone logs in via SSH, console, sudo, su, or graphical login. It's designed for cloud servers, home labs, and production systems where every unauthorized login attempt needs to be caught *immediately*.
 
+![alt text](config/image.png)
 
 ## Quick Start
 ### Create a Telegram Bot
