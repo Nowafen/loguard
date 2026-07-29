@@ -221,139 +221,6 @@ Everything else (including root logins, sudo, su) is tracked as a full Session. 
 
 ---
 
-## 🛠️ Commands
-
-```bash
-loguard status              # Full health report
-loguard enable              # Turn on monitoring
-loguard disable             # Pause all alerts (keeps config)
-loguard test                # Send a test message
-loguard edit                # Interactive config wizard
-loguard logs [n]            # Show last n delivery attempts (default: 20)
-loguard sessions [n]        # Show last n session start/end log lines (default: 40)
-loguard queue               # Show pending unsent alerts
-loguard clear-queue         # Discard all pending alerts
-loguard check               # Run one watchdog pass
-loguard update              # Check for and install updates
-loguard restart             # Disable and re-enable (refreshes PAM)
-loguard uninstall           # Remove everything (asks for confirmation)
-loguard help                # Show all commands
-```
-
----
-
-## 🔒 Security Architecture
-
-### How It Works
-
-1. **PAM Hook** (`loguard-notify`) — Fires on session **open and close**
-   - On open: classifies the session, generates a Session ID, gathers UID/GID/home/shell/TTY/source IP, and writes a `session_start` event
-   - On close: pops the matching Session ID from a per-TTY stack (correctly handles nested sessions, e.g. `sudo` inside an SSH session) and writes a `session_end` event
-   - Writes to `/var/lib/loguard/sessions/events.jsonl` (fast, non-blocking, no network)
-   - `cron`/`systemd` housekeeping never generates an event at all
-
-2. **Daemon** (`loguardd`) — Runs in background
-   - Drains session events, classifies them, looks up GeoIP for remote IPs (cached), sends the initial rich alert
-   - Polls `ps` every few seconds (configurable) for new processes under each active session's TTY + user
-   - Runs every new process through the suspicious-binary list and reverse-shell pattern matcher
-   - Maintains a running Risk Score per session; crossing the threshold fires an immediate HIGH RISK alert
-   - Sends the full Session Summary at logout
-   - Sends alerts to Telegram with automatic retry via the same queue used for tamper alerts
-   - Sends periodic heartbeat messages (so a silent death is noticed)
-
-3. **Watchdog** (`loguard check`, runs every minute via systemd timer)
-   - Verifies the daemon is alive
-   - Checks that PAM rules are still in place
-   - Verifies binary integrity (SHA-256)
-   - If problems found, sends an immediate alert + auto-heals PAM
-
-### Why This Design?
-
-- **Network-independent PAM hook** — A slow Telegram API or GeoIP lookup never delays login
-- **`ps`-based process tracking, not eBPF/auditd** — Zero extra kernel privileges or dependencies; the tradeoff is a few-second polling delay instead of instant kernel-level notification
-- **Retry queue** — Transient network failures don't lose alerts
-- **Self-healing** — If someone disables monitoring via PAM edit, the watchdog catches it and re-applies it within 60 seconds
-- **Integrity checks** — If binaries are replaced, it's detected and alerted
-- **Tamper alerts** — A gap in heartbeats or PAM rules missing triggers a dedicated alert
-
-### What It Can't Protect Against
-
-- **Attacker with full root + physical access to disk** — Can wipe everything
-- **Attacker with kernel module access** — Can hook system calls before PAM
-- **Network layer tampering** — If Telegram API is compromised (rare)
-- **Sub-poll-interval activity** — A process that starts and exits faster than `process_poll_seconds` can be missed by the `ps`-based monitor (a future eBPF/auditd collector would close this gap)
-
-**Reality:** Loguard makes quietly disabling alerts *hard*. It doesn't require 24/7 perfect security, just that alerts can't be silently muted without leaving a trace.
-
----
-
-## 📊 File Locations
-
-```
-Config:               /etc/loguard/config.toml
-PAM manifest:         /etc/loguard/pam_manifest.list
-Integrity hashes:     /etc/loguard/integrity.sha256
-
-Daemon binary:        /opt/loguard/bin/loguard
-PAM hook binary:      /opt/loguard/bin/loguard-notify
-CLI symlink:          /usr/local/bin/loguard
-
-Alert log:            /var/log/loguard/alert.log
-Tamper/health log:    /var/log/loguard/tamper.log
-Session log:          /var/log/loguard/sessions.log
-Suspicious log:       /var/log/loguard/suspicious.log
-Pending queue:        /var/lib/loguard/queue.jsonl
-PID file:             /run/loguard/loguard.pid
-
-Session events:       /var/lib/loguard/sessions/events.jsonl
-Per-TTY session stack: /var/lib/loguard/sessions/by_tty/
-GeoIP cache:          /var/lib/loguard/sessions/geo_cache.jsonl
-Seen-countries list:  /var/lib/loguard/sessions/seen_countries.list
-
-Systemd units:        /etc/systemd/system/loguard*.{service,timer}
-OpenRC init:          /etc/init.d/loguard
-```
-
----
-
-## 🔧 Advanced Configuration
-
-Edit `/etc/loguard/config.toml`:
-
-```toml
-# Loguard configuration
-bot_token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
-chat_id   = "987654321"
-hostname  = "prod-db-1"
-os_info   = "Ubuntu 24.04 LTS (x86_64)"
-
-# Heartbeat: send "I'm alive" message every N minutes (0 = disabled)
-heartbeat_minutes = 15
-
-# Auto-heal: if PAM rules get deleted, re-apply them automatically
-self_heal_pam = true
-
-# Session Monitor v2 settings
-process_poll_seconds = 5     # how often `ps` is scanned for new processes per session
-enable_geoip = true          # country/city/ISP lookups for remote IPs (via ip-api.com)
-high_risk_threshold = 100    # immediate alert fires once a session's risk score reaches this
-```
-
-Changing these values only requires editing the file and running `sudo systemctl restart loguard` — no rebuild needed.
-
-### Rebuild After Code Changes
-
-If you modify the noise lists, suspicious-binary list, or reverse-shell patterns in the C/C++ source, rebuild:
-
-```bash
-cd /path/to/Loguard
-sudo bash install.sh
-```
-
-(`install.sh` always rebuilds from the local source tree if run from inside the repo.)
-
----
-
 ## 🚨 Troubleshooting
 
 ### Alerts Not Arriving
@@ -478,56 +345,20 @@ sudo ln -sf /opt/loguard/bin/loguard /usr/local/bin/loguard
 sudo bash install.sh
 ```
 
-### Why No libcurl?
-
-Loguard spawns `curl` as a subprocess instead of linking `libcurl`. Benefits:
-
-- ✅ No build-time dependency on libcurl-dev headers (which vary by distro)
-- ✅ Smaller, simpler binary
-- ✅ Curl invocations use an argv vector (not a shell string), so bot tokens can never be shell-injected
-- ✅ Curl's SSL/TLS is battle-tested; no reinventing certificate validation
-
-Downside: ~1ms slower per Telegram send (negligible for async delivery).
-
----
-
-## 📈 Monitoring Multiple Servers
-
-Each server runs an independent Loguard instance. All alerts go to the **same Telegram chat ID**, so you get one unified stream.
-
-**Example setup:**
-
-```bash
-# Server 1: prod-db-1
-LOGUARD_BOT_TOKEN=xxx LOGUARD_CHAT_ID=123456789 \
-  LOGUARD_HOSTNAME=prod-db-1 sudo bash install.sh
-
-# Server 2: prod-db-2
-LOGUARD_BOT_TOKEN=xxx LOGUARD_CHAT_ID=123456789 \
-  LOGUARD_HOSTNAME=prod-db-2 sudo bash install.sh
-
-# Server 3: staging-web-1
-LOGUARD_BOT_TOKEN=xxx LOGUARD_CHAT_ID=123456789 \
-  LOGUARD_HOSTNAME=staging-web-1 sudo bash install.sh
-```
-
-All alerts arrive in one chat, with each server identified by its hostname label. Easily spot which server had the login.
-
 ---
 
 ## 🔄 Updates
 
-Loguard can self-update from GitHub Releases:
+Loguard can self-update from GitHub:
 
 ```bash
 sudo loguard update
 ```
 
 This:
-1. Checks GitHub Releases for a newer version
-2. Verifies the binary checksum against the published `SHA256SUMS`
-3. Replaces the binary atomically
-4. Restarts the daemon
+1. Checks GitHub for a newer version
+2. Replaces the binary atomically
+3. Restarts the daemon
 
 If a checksum fails, the update is aborted (safer than deploying a potentially compromised binary).
 
