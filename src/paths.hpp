@@ -34,7 +34,7 @@ inline constexpr const char* kSuspiciousLog   = "/var/log/loguard/suspicious.log
 inline constexpr const char* kRunDir          = "/run/loguard";
 inline constexpr const char* kPidFile         = "/run/loguard/loguard.pid";
 
-inline constexpr const char* kVersion         = "0.1.1";
+inline constexpr const char* kVersion         = "0.1.2";
 inline constexpr const char* kGithubRepo      = "Nowafen/Loguard";
 
 } // namespace loguard::paths
