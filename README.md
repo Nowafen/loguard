@@ -533,34 +533,4 @@ If a checksum fails, the update is aborted (safer than deploying a potentially c
 
 ---
 
-## 📜 License
-
-MIT License — See LICENSE file for details.
-
----
-
-## 🙋 Feedback & Contributions
-
-Found a bug? Have an idea?
-
-- **GitHub Issues:** https://github.com/Nowafen/Loguard/issues
-- **Discussions:** https://github.com/Nowafen/Loguard/discussions
-
-Contributions welcome! For major changes, please open an issue first.
-
----
-
-## ⚠️ Disclaimer
-
-Loguard is a **best-effort** login monitor. It is **not a substitute** for:
-- Regular security audits
-- Proper SSH key management
-- Firewall rules and network segmentation
-- System hardening and kernel updates
-- 24/7 security monitoring services
-
-Use it as part of a *layered defense* strategy, not your only defense.
-
----
-
 **Happy monitoring! 🚀**
