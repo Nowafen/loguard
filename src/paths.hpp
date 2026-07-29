@@ -17,6 +17,7 @@ inline constexpr const char* kIntegrityFile   = "/etc/loguard/integrity.sha256";
 
 inline constexpr const char* kStateDir        = "/var/lib/loguard";
 inline constexpr const char* kQueueFile       = "/var/lib/loguard/queue.jsonl";
+inline constexpr const char* kHeartbeatMsgIdFile = "/var/lib/loguard/heartbeat_msgid.txt";
 
 // Session monitoring (v2)
 inline constexpr const char* kSessionsDir     = "/var/lib/loguard/sessions";
@@ -33,8 +34,9 @@ inline constexpr const char* kSuspiciousLog   = "/var/log/loguard/suspicious.log
 
 inline constexpr const char* kRunDir          = "/run/loguard";
 inline constexpr const char* kPidFile         = "/run/loguard/loguard.pid";
+inline constexpr const char* kAuthCacheDir    = "/run/loguard/auth"; // sudo-style cached-auth timestamps
 
-inline constexpr const char* kVersion         = "0.1.2";
+inline constexpr const char* kVersion         = "0.2.0";
 inline constexpr const char* kGithubRepo      = "Nowafen/Loguard";
 
 } // namespace loguard::paths

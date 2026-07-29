@@ -396,4 +396,11 @@ std::string sha256_file(const std::string& path) {
     return sha256_final(ctx);
 }
 
+std::string sha256_string(const std::string& data) {
+    Sha256Ctx ctx;
+    sha256_init(ctx);
+    sha256_update(ctx, reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    return sha256_final(ctx);
+}
+
 } // namespace loguard::util

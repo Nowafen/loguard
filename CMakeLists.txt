@@ -34,6 +34,8 @@ add_executable(loguard
     src/risk_engine.cpp
     src/pattern_matcher.cpp
     src/process_monitor.cpp
+    src/immutable.cpp
+    src/deadman.cpp
 )
 
 add_executable(loguard-notify

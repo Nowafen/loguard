@@ -11,6 +11,8 @@
 #include "risk_engine.hpp"
 #include "pattern_matcher.hpp"
 #include "process_monitor.hpp"
+#include "immutable.hpp"
+#include "deadman.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -23,6 +25,7 @@
 #include <csignal>
 #include <cstring>
 #include <unistd.h>
+#include <termios.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -56,6 +59,193 @@ void write_pidfile() {
     util::write_file_atomic(paths::kPidFile, std::to_string(getpid()) + "\n", 0644);
 }
 
+// ---------- independent cron-based watchdog (defense-in-depth alongside systemd) ----------
+//
+// systemd (Restart=always + loguard-check.timer) is the primary supervision
+// path. This cron entry is a SEPARATE, independent path: an attacker who
+// disables/stops the systemd units directly (bypassing `loguard disable`)
+// still has this watchdog running unless they also think to clear cron.
+// Conversely, a legitimate `loguard disable` removes this too, so admin
+// intent is always respected -- only an attacker who stops things by hand,
+// leaving one path in place, gets caught by the other.
+bool cron_available() {
+    std::string out;
+    return util::run_capture({"which", "crontab"}, &out, 5) == 0;
+}
+
+void install_cron_watchdog() {
+    if (!cron_available()) {
+        util::log_line(paths::kAlertLog, "cron backup watchdog skipped: crontab not found on this system");
+        return;
+    }
+    std::string existing;
+    util::run_capture({"crontab", "-l"}, &existing, 5); // nonzero/empty if no crontab yet -- fine either way
+
+    std::istringstream in(existing);
+    std::string line, kept;
+    while (std::getline(in, line)) {
+        if (line.find("loguard") == std::string::npos) kept += line + "\n";
+    }
+    kept += std::string("* * * * * ") + paths::kMainBinary + " check >/dev/null 2>&1\n";
+    kept += std::string("* * * * * pgrep -f 'loguard daemon' >/dev/null || nohup ") +
+            paths::kMainBinary + " daemon >/dev/null 2>&1 &\n";
+
+    std::string tmp = "/tmp/loguard-crontab.tmp";
+    util::write_file_atomic(tmp, kept, 0600);
+    std::string out;
+    util::run_capture({"crontab", tmp}, &out, 5);
+    unlink(tmp.c_str());
+}
+
+void remove_cron_watchdog() {
+    if (!cron_available()) return;
+    std::string existing;
+    util::run_capture({"crontab", "-l"}, &existing, 5);
+
+    std::istringstream in(existing);
+    std::string line, kept;
+    while (std::getline(in, line)) {
+        if (line.find("loguard") == std::string::npos) kept += line + "\n";
+    }
+    std::string tmp = "/tmp/loguard-crontab.tmp";
+    util::write_file_atomic(tmp, kept, 0600);
+    std::string out;
+    util::run_capture({"crontab", tmp}, &out, 5);
+    unlink(tmp.c_str());
+}
+
+// ---------- sudo-style cached auth, scoped to the parent shell process ----------
+//
+// sudo caches a successful auth for N minutes so you aren't re-prompted for
+// every single `sudo` call in the same shell. We do the same thing, keyed
+// not by tty (a pts number gets reused by a totally different login within
+// minutes) but by the PARENT PROCESS's pid + its exact start time, read
+// from /proc/<ppid>/stat. That pairing is effectively unique: if the shell
+// that invoked `loguard` exits and a new one starts, it gets a new pid or
+// at least a new start time, so the cached auth silently stops applying --
+// no stale approval can leak across sessions the way a bare tty-name key
+// could.
+long process_start_time(pid_t pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
+    if (!in.good()) return -1;
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // Field 2 (comm) is parenthesized and may itself contain spaces/parens,
+    // so skip to the LAST ')' before splitting the remaining fields.
+    auto close_paren = content.find_last_of(')');
+    if (close_paren == std::string::npos || close_paren + 2 >= content.size()) return -1;
+    std::istringstream rest(content.substr(close_paren + 2));
+    std::string token;
+    int field = 3; // fields 1=pid, 2=comm already consumed
+    while (rest >> token) {
+        if (field == 22) { try { return std::stol(token); } catch (...) { return -1; } }
+        field++;
+    }
+    return -1;
+}
+
+std::string auth_session_key() {
+    pid_t ppid = getppid();
+    long start = process_start_time(ppid);
+    if (start < 0) return ""; // couldn't determine -- caching disabled, always prompt
+    return std::to_string(ppid) + "_" + std::to_string(start);
+}
+
+bool auth_cache_valid(const std::string& key, int grace_seconds) {
+    if (key.empty() || grace_seconds <= 0) return false;
+    struct stat st{};
+    std::string path = std::string(paths::kAuthCacheDir) + "/" + key + ".stamp";
+    if (stat(path.c_str(), &st) != 0) return false;
+    long age = (long)time(nullptr) - (long)st.st_mtime;
+    return age >= 0 && age <= grace_seconds;
+}
+
+void auth_cache_touch(const std::string& key) {
+    if (key.empty()) return;
+    util::make_dirs(paths::kAuthCacheDir, 0700);
+    util::write_file_atomic(std::string(paths::kAuthCacheDir) + "/" + key + ".stamp",
+                             std::to_string(time(nullptr)) + "\n", 0600);
+}
+
+void auth_cache_clear_all() {
+    std::string out;
+    util::run_capture({"rm", "-rf", paths::kAuthCacheDir}, &out);
+    util::make_dirs(paths::kAuthCacheDir, 0700);
+}
+
+// ---------- admin passphrase gate ----------
+//
+// This does NOT stop a determined root attacker willing to bypass our CLI
+// entirely (edit PAM/config files directly, kill -9, rebuild their own
+// binary). What it DOES stop is casual/automated abuse of Loguard's own
+// `disable`/`uninstall`/`edit` commands -- and a failed attempt is itself
+// an immediate, high-signal Telegram alert, turning a disable attempt into
+// an early warning instead of a silent success.
+
+std::string read_hidden(FILE* tty, const std::string& prompt) {
+    fprintf(tty, "%s", prompt.c_str());
+    fflush(tty);
+    int fd = fileno(tty);
+    struct termios oldt{}, newt{};
+    bool have_termios = (tcgetattr(fd, &oldt) == 0);
+    if (have_termios) {
+        newt = oldt;
+        newt.c_lflag &= ~ECHO;
+        tcsetattr(fd, TCSANOW, &newt);
+    }
+    char buf[256] = {0};
+    if (!fgets(buf, sizeof(buf), tty)) buf[0] = '\0';
+    if (have_termios) tcsetattr(fd, TCSANOW, &oldt);
+    fprintf(tty, "\n");
+
+    std::string s(buf);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    return s;
+}
+
+bool verify_passphrase(const Config& cfg, const std::string& attempt) {
+    if (cfg.admin_passphrase_hash.empty()) return true; // not configured -- gate is a no-op
+    return util::sha256_string(cfg.admin_passphrase_salt + attempt) == cfg.admin_passphrase_hash;
+}
+
+// Prompts (hidden input) up to 3 times -- unless a valid cached auth exists
+// for this exact parent shell (sudo-style, see auth_session_key() above),
+// in which case it's skipped entirely. On 3 failures, logs it and -- if
+// Telegram is configured -- sends an immediate alert, then returns false.
+bool require_passphrase_gate(const Config& cfg, const std::string& action_label) {
+    if (cfg.admin_passphrase_hash.empty()) return true;
+
+    std::string session_key = auth_session_key();
+    if (auth_cache_valid(session_key, cfg.passphrase_cache_seconds)) {
+        return true; // already authenticated recently from this same shell
+    }
+
+    FILE* tty = fopen("/dev/tty", "r+");
+    if (!tty) {
+        std::cerr << "No interactive terminal available to enter the admin passphrase -- "
+                     "refusing to " << action_label << ".\n";
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        std::string attempt = read_hidden(tty, "Enter admin passphrase to " + action_label + ": ");
+        if (verify_passphrase(cfg, attempt)) {
+            fclose(tty);
+            auth_cache_touch(session_key);
+            return true;
+        }
+        fprintf(tty, "Incorrect passphrase.\n");
+    }
+    fclose(tty);
+
+    util::log_line(paths::kTamperLog, "FAILED admin passphrase (3 attempts) while attempting to " + action_label);
+    if (cfg.valid) {
+        std::string html = "🔴 <b>Failed Passphrase Attempt</b>\nHost: <code>" + cfg.hostname +
+            "</code>\nSomeone tried to <b>" + action_label + "</b> and failed the admin passphrase "
+            "check 3 times.\nTime: <code>" + util::now_str() + "</code>";
+        telegram::send_message(cfg.bot_token, cfg.chat_id, html);
+    }
+    return false;
+}
+
 // ---------- shared: one tamper/integrity check pass ----------
 // Returns true if everything looks fine.
 bool run_check_pass(const Config& cfg, bool attempt_self_heal) {
@@ -70,6 +260,14 @@ bool run_check_pass(const Config& cfg, bool attempt_self_heal) {
 
     auto bad_hashes = integrity::verify();
     for (auto& p : bad_hashes) problems.push_back("Integrity: " + p);
+
+    bool immutable_missing = false;
+    if (cfg.enable_immutable) {
+        if (!immutable::is_set(paths::kMainBinary) || !immutable::is_set(paths::kHookBinary)) {
+            problems.push_back("Immutable (+i) protection removed from a Loguard binary");
+            immutable_missing = true;
+        }
+    }
 
     if (problems.empty()) return true;
 
@@ -94,9 +292,12 @@ bool run_check_pass(const Config& cfg, bool attempt_self_heal) {
         }
     }
 
-    if (attempt_self_heal && cfg.self_heal_pam && !tampered.empty() && util::is_root()) {
+    if (attempt_self_heal && cfg.self_heal_pam && (!tampered.empty() || immutable_missing) && util::is_root()) {
+        immutable::unprotect_all(); // must clear +i before pam::enable() can rewrite these files
         int n = pam::enable();
-        util::log_line(paths::kTamperLog, "self-heal: re-applied PAM hook to " + std::to_string(n) + " file(s)");
+        if (cfg.enable_immutable) immutable::protect_all();
+        util::log_line(paths::kTamperLog, "self-heal: re-applied PAM hook to " + std::to_string(n) +
+                        " file(s)" + (cfg.enable_immutable ? " and re-applied immutable protection" : ""));
     }
 
     return false;
@@ -321,7 +522,7 @@ int cmd_daemon() {
 
     util::log_line(paths::kAlertLog, "loguardd started (pid " + std::to_string(getpid()) + ")");
 
-    time_t last_heartbeat = 0, last_check = 0, last_session_poll = 0;
+    time_t last_heartbeat = 0, last_check = 0, last_session_poll = 0, last_deadman = 0;
     while (!g_stop) {
         Config cfg = load_config(paths::kConfigFile);
 
@@ -334,12 +535,34 @@ int cmd_daemon() {
             poll_active_sessions(cfg);
             last_session_poll = now;
         }
+
+        if (!cfg.healthcheck_url.empty()) {
+            int dm_every = cfg.deadman_interval_seconds > 0 ? cfg.deadman_interval_seconds : 120;
+            if (now - last_deadman >= dm_every) {
+                bool ok = deadman::ping(cfg.healthcheck_url);
+                if (!ok) util::log_line(paths::kAlertLog, "DEADMAN | ping failed (will retry next interval)");
+                last_deadman = now;
+            }
+        }
+
         if (cfg.valid && cfg.heartbeat_minutes > 0 &&
             now - last_heartbeat >= cfg.heartbeat_minutes * 60) {
+            // Remove the PREVIOUS heartbeat from the chat first, so heartbeats
+            // never pile up -- only the latest one is ever visible.
+            auto prev = util::read_lines(paths::kHeartbeatMsgIdFile);
+            if (!prev.empty()) {
+                long prev_id = 0;
+                try { prev_id = std::stol(prev[0]); } catch (...) {}
+                if (prev_id > 0) telegram::delete_message(cfg.bot_token, cfg.chat_id, prev_id);
+            }
+
             std::string html = "<b>Loguard heartbeat</b>\nHost: <code>" + cfg.hostname +
                                 "</code>\nStatus: alive\nTime: <code>" + util::now_str() + "</code>";
-            bool ok = telegram::send_message(cfg.bot_token, cfg.chat_id, html);
-            util::log_line(paths::kAlertLog, std::string("HEARTBEAT | ") + (ok ? "sent" : "failed"));
+            long msg_id = telegram::send_message_get_id(cfg.bot_token, cfg.chat_id, html);
+            util::log_line(paths::kAlertLog, std::string("HEARTBEAT | ") + (msg_id > 0 ? "sent" : "failed"));
+            if (msg_id > 0) {
+                util::write_file_atomic(paths::kHeartbeatMsgIdFile, std::to_string(msg_id) + "\n", 0600);
+            }
             last_heartbeat = now;
         }
 
@@ -352,6 +575,18 @@ int cmd_daemon() {
     }
 
     util::log_line(paths::kAlertLog, "loguardd stopping (pid " + std::to_string(getpid()) + ")");
+    {
+        // Don't leave a stale "Status: alive" message sitting in the chat
+        // after a graceful stop.
+        Config cfg = load_config(paths::kConfigFile);
+        auto prev = util::read_lines(paths::kHeartbeatMsgIdFile);
+        if (cfg.valid && !prev.empty()) {
+            long prev_id = 0;
+            try { prev_id = std::stol(prev[0]); } catch (...) {}
+            if (prev_id > 0) telegram::delete_message(cfg.bot_token, cfg.chat_id, prev_id);
+        }
+        util::run_capture({"rm", "-f", paths::kHeartbeatMsgIdFile});
+    }
     unlink(paths::kPidFile);
     return 0;
 }
@@ -396,6 +631,21 @@ void print_status() {
     auto integrity_problems = integrity::verify();
     std::cout << "Integrity:   " << (integrity_problems.empty() ? "OK" : "PROBLEM DETECTED") << "\n";
     for (auto& p : integrity_problems) std::cout << "               - " << p << "\n";
+
+    if (cfg.enable_immutable) {
+        bool prot = immutable::is_set(paths::kMainBinary) && immutable::is_set(paths::kHookBinary);
+        std::cout << "Immutable:   " << (prot ? "ON (chattr +i)" : "OFF -- expected ON, self-heal will re-apply") << "\n";
+    } else {
+        std::cout << "Immutable:   disabled in config\n";
+    }
+
+    std::cout << "Dead-man:    " << (cfg.healthcheck_url.empty()
+        ? "not configured (see `loguard edit`)"
+        : "pinging every " + std::to_string(cfg.deadman_interval_seconds) + "s") << "\n";
+
+    std::cout << "Passphrase:  " << (cfg.admin_passphrase_hash.empty()
+        ? "NOT SET (see `loguard set-password`)"
+        : "set -- required for disable/uninstall/edit") << "\n";
 
     auto pending = queue::load_all(paths::kQueueFile);
     std::cout << "Queue:       " << pending.size() << " pending message(s)\n";
@@ -448,6 +698,8 @@ void edit_wizard() {
     Config cfg = load_config(paths::kConfigFile);
     if (cfg.hostname.empty()) cfg.hostname = util::hostname_str();
 
+    if (!require_passphrase_gate(cfg, "edit configuration")) { std::exit(1); }
+
     FILE* tty = fopen("/dev/tty", "r+");
     if (!tty) { std::cerr << "No interactive terminal available.\n"; return; }
 
@@ -468,8 +720,10 @@ void edit_wizard() {
         fprintf(tty, "2. Chat ID    -> %s\n", cfg.chat_id.empty() ? "(not set)" : cfg.chat_id.c_str());
         fprintf(tty, "3. Hostname   -> %s\n", cfg.hostname.c_str());
         fprintf(tty, "4. Heartbeat  -> every %d minute(s) (0 = disabled)\n", cfg.heartbeat_minutes);
-        fprintf(tty, "5. Save & Exit\n6. Exit without saving\n\n");
-        std::string choice = prompt("Enter choice [1-6]: ");
+        fprintf(tty, "5. Immutable protection (chattr +i) -> %s\n", cfg.enable_immutable ? "ON" : "OFF");
+        fprintf(tty, "6. Dead-man's-switch URL -> %s\n", cfg.healthcheck_url.empty() ? "(not set)" : cfg.healthcheck_url.c_str());
+        fprintf(tty, "7. Save & Exit\n8. Exit without saving\n\n");
+        std::string choice = prompt("Enter choice [1-8]: ");
 
         if (choice == "1") {
             std::string v = prompt("Enter Bot Token (Enter to keep current): ");
@@ -484,6 +738,14 @@ void edit_wizard() {
             std::string v = prompt("Heartbeat interval in minutes (0 = disabled): ");
             try { cfg.heartbeat_minutes = std::stoi(v); } catch (...) {}
         } else if (choice == "5") {
+            std::string v = prompt("Enable immutable (chattr +i) protection? [y/n]: ");
+            cfg.enable_immutable = (v == "y" || v == "Y");
+            fprintf(tty, "Note: takes effect on the next `loguard enable` / `loguard restart`.\n");
+        } else if (choice == "6") {
+            fprintf(tty, "Get a free check at https://healthchecks.io, then paste its ping URL.\n");
+            std::string v = prompt("Dead-man's-switch ping URL (Enter to clear/disable): ");
+            cfg.healthcheck_url = v;
+        } else if (choice == "7") {
             if (cfg.bot_token.empty() || cfg.chat_id.empty()) {
                 fprintf(tty, "Warning: Bot Token and Chat ID are REQUIRED to receive alerts.\n");
             }
@@ -491,7 +753,7 @@ void edit_wizard() {
             save_config(paths::kConfigFile, cfg);
             fprintf(tty, "Configuration saved. Now run: sudo loguard test\n");
             break;
-        } else if (choice == "6") {
+        } else if (choice == "8") {
             fprintf(tty, "No changes saved.\n");
             break;
         } else {
@@ -508,12 +770,23 @@ void cmd_enable() {
     util::make_dirs(paths::kLogDir, 0700);
     util::make_dirs(paths::kSessionsDir, 0700);
     util::make_dirs(paths::kSessionByTtyDir, 0700);
+
+    Config cfg = load_config(paths::kConfigFile);
+
     int n = pam::enable();
     integrity::save_manifest();
     std::string out;
     util::run_capture({"systemctl", "daemon-reload"}, &out);
     util::run_capture({"systemctl", "enable", "--now", "loguard.service"}, &out);
     util::run_capture({"systemctl", "enable", "--now", "loguard-check.timer"}, &out);
+
+    install_cron_watchdog(); // independent of systemd -- see its own comment
+
+    if (cfg.enable_immutable) {
+        immutable::protect_all();
+        std::cout << "Immutable protection applied (chattr +i) to binaries and PAM files.\n";
+    }
+
     std::cout << "Loguard enabled -- PAM hook applied to " << n << " file(s).\n";
     std::cout << "Monitoring: SSH, Console, SU, SUDO, Graphical login\n";
     if (!daemon_is_running()) {
@@ -525,12 +798,32 @@ void cmd_enable() {
 
 void cmd_disable() {
     require_root("loguard disable");
+    Config cfg = load_config(paths::kConfigFile);
+    if (!require_passphrase_gate(cfg, "disable Loguard")) { std::exit(1); }
+
+    immutable::unprotect_all(); // must clear +i before pam::disable() can rewrite PAM files
     int n = pam::disable();
+
     std::string out;
     util::run_capture({"systemctl", "stop", "loguard.service"}, &out);
     util::run_capture({"systemctl", "stop", "loguard-check.timer"}, &out);
+    remove_cron_watchdog();
+
     std::cout << "Loguard disabled -- PAM hook removed from " << n << " file(s).\n";
-    std::cout << "The daemon itself was stopped too; alerts are fully paused.\n";
+    std::cout << "Immutable protection and the cron backup watchdog were removed too.\n";
+    std::cout << "The daemon itself was stopped; alerts are fully paused.\n";
+
+    if (cfg.valid) {
+        std::string html = "ℹ️ <b>Loguard Disabled</b>\nHost: <code>" + cfg.hostname +
+            "</code>\nAn authenticated admin ran `loguard disable`.\nTime: <code>" +
+            util::now_str() + "</code>";
+        telegram::send_message(cfg.bot_token, cfg.chat_id, html);
+    }
+    if (!cfg.healthcheck_url.empty()) {
+        std::cout << "\nNote: an external dead-man's-switch is configured (" << cfg.healthcheck_url << ").\n";
+        std::cout << "Since pings will stop, it WILL eventually alert unless you pause it yourself\n";
+        std::cout << "on its dashboard first -- this is expected for planned maintenance.\n";
+    }
 }
 
 void cmd_test() {
@@ -554,6 +847,9 @@ void cmd_test() {
 
 void cmd_uninstall() {
     require_root("loguard uninstall");
+    Config cfg = load_config(paths::kConfigFile);
+    if (!require_passphrase_gate(cfg, "uninstall Loguard")) { std::exit(1); }
+
     std::cout << "WARNING: this will completely remove Loguard from this system:\n"
                  "  - all configuration, logs, and pending alerts\n"
                  "  - all PAM rules\n"
@@ -562,6 +858,17 @@ void cmd_uninstall() {
     std::string ans; std::getline(std::cin, ans);
     if (ans != "yes") { std::cout << "Uninstall cancelled.\n"; return; }
 
+    // Send this BEFORE anything is deleted -- cfg (bot token/chat id) won't
+    // exist anymore a few lines from now.
+    if (cfg.valid) {
+        std::string html = "ℹ️ <b>Loguard Uninstalled</b>\nHost: <code>" + cfg.hostname +
+            "</code>\nAn authenticated admin ran `loguard uninstall`. This is the last "
+            "alert you will receive from this host.\nTime: <code>" + util::now_str() + "</code>";
+        telegram::send_message(cfg.bot_token, cfg.chat_id, html);
+    }
+
+    immutable::unprotect_all(); // must clear +i before any of the following can succeed
+    remove_cron_watchdog();
     pam::disable();
     std::string out;
     util::run_capture({"systemctl", "disable", "--now", "loguard.service"}, &out);
@@ -705,8 +1012,11 @@ void cmd_update() {
         std::exit(1);
     }
 
+    Config cfg = load_config(paths::kConfigFile);
     std::string out;
     util::run_capture({"systemctl", "stop", "loguard.service"}, &out);
+    immutable::set(paths::kMainBinary, false); // +i would block the rename in install_binary_atomic
+    immutable::set(paths::kHookBinary, false);
     bool ok1 = install_binary_atomic(build_dir + "/loguard", paths::kMainBinary);
     bool ok2 = install_binary_atomic(build_dir + "/loguard-notify", paths::kHookBinary);
     if (!ok1 || !ok2) {
@@ -716,10 +1026,58 @@ void cmd_update() {
         std::exit(1);
     }
     integrity::save_manifest();
+    if (cfg.enable_immutable) {
+        immutable::set(paths::kMainBinary, true);
+        immutable::set(paths::kHookBinary, true);
+    }
     util::run_capture({"systemctl", "start", "loguard.service"}, &out);
     util::run_capture({"rm", "-rf", extract_dir, build_dir}, &out);
 
     std::cout << "Updated to v" << remote_version << ". Run `loguard status` to confirm.\n";
+}
+
+void cmd_set_password() {
+    require_root("loguard set-password");
+    Config cfg = load_config(paths::kConfigFile);
+    const char* env_pass = getenv("LOGUARD_ADMIN_PASSWORD");
+
+    if (!cfg.admin_passphrase_hash.empty() && !(env_pass && *env_pass)) {
+        if (!require_passphrase_gate(cfg, "change the admin passphrase")) { std::exit(1); }
+    } else if (cfg.admin_passphrase_hash.empty()) {
+        std::cout << "No admin passphrase is set yet. Once set, it will be required for\n"
+                     "`loguard disable`, `loguard uninstall`, and `loguard edit`.\n\n";
+    }
+
+    std::string p1, p2;
+    if (env_pass && *env_pass) {
+        p1 = p2 = env_pass; // non-interactive path, e.g. install.sh with LOGUARD_ADMIN_PASSWORD set
+    } else {
+        FILE* tty = fopen("/dev/tty", "r+");
+        if (!tty) { std::cerr << "No interactive terminal available.\n"; std::exit(1); }
+        p1 = read_hidden(tty, "New admin passphrase: ");
+        p2 = read_hidden(tty, "Confirm new admin passphrase: ");
+        fclose(tty);
+    }
+
+    if (p1.empty()) { std::cerr << "Passphrase cannot be empty. Nothing changed.\n"; std::exit(1); }
+    if (p1 != p2) { std::cerr << "Passphrases did not match. Nothing changed.\n"; std::exit(1); }
+    if (p1.size() < 8) { std::cerr << "Use at least 8 characters. Nothing changed.\n"; std::exit(1); }
+
+    cfg.admin_passphrase_salt = util::gen_session_id() + util::gen_session_id(); // 32 hex chars
+    cfg.admin_passphrase_hash = util::sha256_string(cfg.admin_passphrase_salt + p1);
+    util::make_dirs(paths::kConfigDir, 0700);
+    if (!save_config(paths::kConfigFile, cfg)) {
+        std::cerr << "Failed to save config.\n"; std::exit(1);
+    }
+    auth_cache_clear_all(); // old cached sessions were authenticated under the OLD passphrase
+    std::cout << "Admin passphrase set.\n";
+}
+
+void cmd_lock() {
+    require_root("loguard lock");
+    auth_cache_clear_all();
+    std::cout << "Cleared all cached passphrase sessions -- `disable`/`uninstall`/`edit` will "
+                 "prompt again everywhere, immediately (same as `sudo -k`).\n";
 }
 
 void print_help() {
@@ -734,6 +1092,8 @@ GETTING STARTED (first time on a new machine)
   1. sudo loguard edit           configure your Telegram Bot Token & Chat ID
   2. sudo loguard test           send a test message to confirm it works
   3. sudo loguard enable         turn on real-time monitoring
+  4. sudo loguard set-password   (recommended) require a passphrase before
+                                 disable/uninstall/edit can be used again
 
 COMMANDS
   status              Show full health status: daemon, PAM hook, config,
@@ -755,7 +1115,19 @@ COMMANDS
 
   edit                Interactive wizard to set/change the Bot Token,
                        Chat ID, hostname label, and heartbeat interval.
+                       Requires root, and the admin passphrase if one is set.
+
+  set-password        Set or change the admin passphrase. Once set, it is
+                       required (hidden input, 3 attempts) before
+                       `disable`, `uninstall`, or `edit` will proceed --
+                       3 failed attempts sends an immediate Telegram alert.
                        Requires root.
+
+  lock                Immediately forgets every cached passphrase session
+                       (same idea as `sudo -k`) -- the next `disable`/
+                       `uninstall`/`edit` will prompt again everywhere,
+                       right now, instead of waiting for the cache to
+                       expire on its own. Requires root.
 
   logs [n]            Show the last n delivery log lines (default 20).
                        Every send attempt (SENT/FAILED) is recorded here.
@@ -825,6 +1197,36 @@ HOW IT WORKS (Session Monitor v2)
     systemd timer independent of the daemon) verifies the daemon, the PAM
     rules, and the binaries themselves haven't been tampered with, and
     alerts immediately if so.
+
+ANTI-TAMPER HARDENING (v2.2)
+  - Immutable binaries/PAM files (chattr +i): applied automatically after
+    `enable`. Even root cannot overwrite, delete, or rename these files
+    without first clearing the flag -- a real speed bump, checked every
+    watchdog pass and re-applied automatically if removed.
+  - Independent cron backup watchdog: `enable` also installs a `crontab`
+    entry (separate from systemd) that runs `loguard check` and restarts
+    the daemon if it's not running. An attacker who disables the systemd
+    units directly (bypassing `loguard disable`) still has to separately
+    find and clear this cron entry.
+  - External dead-man's-switch: if `healthcheck_url` is set (e.g. a free
+    https://healthchecks.io check), the daemon pings it periodically. If
+    pings stop -- because the daemon was killed, the box was wiped, or
+    anything else -- that EXTERNAL service raises the alarm, not this
+    machine. This is the one layer that survives a full compromise of this
+    exact host, since disabling it requires compromising the external
+    service too.
+  - Admin passphrase (`loguard set-password`): once set, required (hidden
+    input, 3 attempts) before `disable`, `uninstall`, or `edit` will
+    proceed. 3 failed attempts fires an immediate Telegram alert. This
+    stops casual/automated abuse of Loguard's own commands -- it does not
+    stop an attacker willing to bypass the CLI entirely and edit files by
+    hand, which no local passphrase can prevent.
+  - Just like `sudo`: a successful passphrase entry is cached for
+    `passphrase_cache_seconds` (default 300s) so you aren't re-prompted for
+    every single command -- but the cache is scoped to the exact parent
+    shell process (pid + start time, not just the tty, which can be reused
+    by a different login within minutes), so a new shell/session always
+    re-prompts. `loguard lock` clears the cache immediately (like `sudo -k`).
   - No component can PERFECTLY guarantee delivery against an attacker who
     gains full root access to this exact machine forever (they could, in
     the extreme, wipe the disk). What this design guarantees is that
@@ -889,6 +1291,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "edit") { require_root("loguard edit"); edit_wizard(); return 0; }
+    if (cmd == "set-password") { cmd_set_password(); return 0; }
+    if (cmd == "lock") { cmd_lock(); return 0; }
     if (cmd == "enable") { cmd_enable(); return 0; }
     if (cmd == "disable") { cmd_disable(); return 0; }
     if (cmd == "restart") { cmd_disable(); cmd_enable(); return 0; }

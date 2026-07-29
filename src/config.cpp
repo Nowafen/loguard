@@ -47,6 +47,12 @@ Config load_config(const std::string& path) {
         else if (key == "process_poll_seconds") { try { c.process_poll_seconds = std::stoi(val); } catch (...) {} }
         else if (key == "enable_geoip") c.enable_geoip = (val == "true" || val == "1");
         else if (key == "high_risk_threshold") { try { c.high_risk_threshold = std::stoi(val); } catch (...) {} }
+        else if (key == "enable_immutable") c.enable_immutable = (val == "true" || val == "1");
+        else if (key == "healthcheck_url") c.healthcheck_url = val;
+        else if (key == "deadman_interval_seconds") { try { c.deadman_interval_seconds = std::stoi(val); } catch (...) {} }
+        else if (key == "admin_passphrase_hash") c.admin_passphrase_hash = val;
+        else if (key == "admin_passphrase_salt") c.admin_passphrase_salt = val;
+        else if (key == "passphrase_cache_seconds") { try { c.passphrase_cache_seconds = std::stoi(val); } catch (...) {} }
     }
 
     if (c.hostname.empty()) c.hostname = util::hostname_str();
@@ -70,6 +76,15 @@ bool save_config(const std::string& path, const Config& c) {
     out << "process_poll_seconds = " << c.process_poll_seconds << "\n";
     out << "enable_geoip = " << (c.enable_geoip ? "true" : "false") << "\n";
     out << "high_risk_threshold = " << c.high_risk_threshold << "\n";
+    out << "enable_immutable = " << (c.enable_immutable ? "true" : "false") << "\n";
+    if (!c.healthcheck_url.empty())
+        out << "healthcheck_url = \"" << c.healthcheck_url << "\"\n";
+    out << "deadman_interval_seconds = " << c.deadman_interval_seconds << "\n";
+    if (!c.admin_passphrase_hash.empty()) {
+        out << "admin_passphrase_hash = \"" << c.admin_passphrase_hash << "\"\n";
+        out << "admin_passphrase_salt = \"" << c.admin_passphrase_salt << "\"\n";
+    }
+    out << "passphrase_cache_seconds = " << c.passphrase_cache_seconds << "\n";
     return util::write_file_atomic(path, out.str(), 0600);
 }
 

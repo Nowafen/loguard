@@ -53,6 +53,11 @@ int run_capture(const std::vector<std::string>& argv,
 // sha256 of a file's contents, as lowercase hex. Empty string on error.
 std::string sha256_file(const std::string& path);
 
+// sha256 of an in-memory string, as lowercase hex. Used for the admin
+// passphrase gate (config.cpp stores only this hash + a random salt, never
+// the passphrase itself).
+std::string sha256_string(const std::string& data);
+
 bool is_root();
 std::string hostname_str();
 

@@ -1,31 +1,40 @@
 #!/sbin/openrc-run
+# Loguard daemon init script for OpenRC systems (Alpine Linux, Gentoo, etc.)
 
-name="loguard"
-description="Loguard Login Alert Daemon"
-
+description="Loguard Real-Time Login Alert Daemon"
 command="/opt/loguard/bin/loguard"
 command_args="daemon"
-command_user="root"
+command_background="yes"
 pidfile="/run/loguard/loguard.pid"
+error_marker=""
 
 depend() {
     need net
-    after firewall
+    after net
 }
 
 start_pre() {
-    mkdir -p /run/loguard
-    chmod 0755 /run/loguard
+    mkdir -p /run/loguard /var/lib/loguard /var/log/loguard
+    chmod 700 /run/loguard /var/lib/loguard /var/log/loguard
+}
+
+start() {
+    ebegin "Starting ${description}"
+    start-stop-daemon --start --pidfile "${pidfile}" \
+        --exec "$command" -- $command_args
+    eend $?
 }
 
 stop() {
-    if [ -f "${pidfile}" ]; then
-        local pid=$(cat "${pidfile}")
-        if [ -n "${pid}" ]; then
-            kill -TERM "${pid}" 2>/dev/null
-            sleep 2
-            kill -KILL "${pid}" 2>/dev/null || true
-        fi
+    ebegin "Stopping ${description}"
+    start-stop-daemon --stop --pidfile "${pidfile}"
+    eend $?
+}
+
+status() {
+    if [ -e "${pidfile}" ]; then
+        ewarn "${description} is running (pid $(cat ${pidfile}))"
+    else
+        einfo "${description} is not running"
     fi
-    rm -f "${pidfile}"
 }

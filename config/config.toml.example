@@ -23,3 +23,19 @@ enable_geoip = true
 
 # A session's risk score crossing this value fires an immediate HIGH RISK alert
 high_risk_threshold = 100
+
+# --- Anti-tamper hardening (v0.2.0) ---
+
+# chattr +i on binaries + PAM files after `enable` -- even root must clear
+# this flag before it can overwrite/delete/rename those files.
+enable_immutable = true
+
+# External dead-man's-switch: get a free check at https://healthchecks.io,
+# paste its ping URL here. If pings stop, THAT service alerts you -- not
+# this machine -- which is what makes it survive a full compromise of this
+# exact host. Leave empty to disable.
+healthcheck_url = ""
+deadman_interval_seconds = 120
+
+# admin_passphrase_hash / admin_passphrase_salt are written automatically by
+# `sudo loguard set-password` -- never set these by hand.

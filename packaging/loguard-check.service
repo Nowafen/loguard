@@ -1,9 +1,29 @@
 [Unit]
-Description=Loguard Watchdog Check
-After=loguard.service
+Description=Loguard Watchdog Check (Tamper Detection)
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/Nowafen/Loguard
 
 [Service]
 Type=oneshot
 ExecStart=/opt/loguard/bin/loguard check
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=loguard-check
 User=root
-Group=root
+
+# Security hardening (same as daemon)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/loguard /var/lib/loguard /var/log/loguard /run/loguard
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateDevices=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true

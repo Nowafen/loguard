@@ -78,27 +78,47 @@ log "Init system: $INIT_SYSTEM"
 # 3. Install build dependencies (curl + C/C++ toolchain)
 # ---------------------------------------------------------------------------
 install_deps() {
-    if command -v curl >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1 && command -v make >/dev/null 2>&1 && command -v ps >/dev/null 2>&1; then
-        log "curl/gcc/g++/make/ps already present -- skipping package installation."
-        return
+    if command -v curl >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1 && command -v gcc >/dev/null 2>&1 \
+       && command -v make >/dev/null 2>&1 && command -v ps >/dev/null 2>&1 && command -v chattr >/dev/null 2>&1; then
+        log "curl/gcc/g++/make/ps/chattr already present -- skipping package installation."
+    else
+        log "Installing dependencies (curl, gcc, g++, make, ps, chattr/lsattr)..."
+        case "$PKG_MGR" in
+            apt)
+                apt-get update -y -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates gcc g++ make procps e2fsprogs
+                ;;
+            dnf)    dnf install -y -q curl gcc gcc-c++ make procps-ng e2fsprogs ;;
+            yum)    yum install -y -q curl gcc gcc-c++ make procps-ng e2fsprogs ;;
+            zypper) zypper --non-interactive install curl gcc gcc-c++ make procps e2fsprogs ;;
+            pacman) pacman -Sy --noconfirm --needed curl gcc make procps-ng e2fsprogs ;;
+            apk)    apk add --no-cache curl gcc g++ make musl-dev procps e2fsprogs ;;
+            *)
+                command -v curl   >/dev/null 2>&1 || die "curl is required and no package manager was detected -- install it manually."
+                command -v g++    >/dev/null 2>&1 || die "g++ is required and no package manager was detected -- install it manually."
+                command -v ps     >/dev/null 2>&1 || die "ps (procps) is required for Session Monitor process tracking -- install it manually."
+                command -v chattr >/dev/null 2>&1 || warn "chattr (e2fsprogs) not found -- immutable-file hardening will be skipped."
+                ;;
+        esac
     fi
-    log "Installing dependencies (curl, gcc, g++, make, ps)..."
-    case "$PKG_MGR" in
-        apt)
-            apt-get update -y -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates gcc g++ make procps
-            ;;
-        dnf)    dnf install -y -q curl gcc gcc-c++ make procps-ng ;;
-        yum)    yum install -y -q curl gcc gcc-c++ make procps-ng ;;
-        zypper) zypper --non-interactive install curl gcc gcc-c++ make procps ;;
-        pacman) pacman -Sy --noconfirm --needed curl gcc make procps-ng ;;
-        apk)    apk add --no-cache curl gcc g++ make musl-dev procps ;;
-        *)
-            command -v curl >/dev/null 2>&1 || die "curl is required and no package manager was detected -- install it manually."
-            command -v g++  >/dev/null 2>&1 || die "g++ is required and no package manager was detected -- install it manually."
-            command -v ps   >/dev/null 2>&1 || die "ps (procps) is required for Session Monitor process tracking -- install it manually."
-            ;;
-    esac
+
+    # cron is a SEPARATE, best-effort hardening layer (backup watchdog independent
+    # of systemd) -- install it if easy, but never fail the whole install over it.
+    if ! command -v crontab >/dev/null 2>&1; then
+        log "Installing cron (backup watchdog, independent of systemd)..."
+        case "$PKG_MGR" in
+            apt)    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cron 2>/dev/null || warn "Could not install cron -- skipping backup watchdog layer." ;;
+            dnf)    dnf install -y -q cronie 2>/dev/null || warn "Could not install cronie -- skipping backup watchdog layer." ;;
+            yum)    yum install -y -q cronie 2>/dev/null || warn "Could not install cronie -- skipping backup watchdog layer." ;;
+            zypper) zypper --non-interactive install cron 2>/dev/null || warn "Could not install cron -- skipping backup watchdog layer." ;;
+            pacman) pacman -Sy --noconfirm --needed cronie 2>/dev/null || warn "Could not install cronie -- skipping backup watchdog layer." ;;
+            apk)    apk add --no-cache dcron 2>/dev/null || warn "Could not install dcron -- skipping backup watchdog layer." ;;
+            *)      warn "No package manager detected for cron -- skipping backup watchdog layer." ;;
+        esac
+        command -v systemctl >/dev/null 2>&1 && systemctl enable --now cron 2>/dev/null
+        command -v systemctl >/dev/null 2>&1 && systemctl enable --now crond 2>/dev/null
+        command -v systemctl >/dev/null 2>&1 && systemctl enable --now cronie 2>/dev/null
+    fi
 }
 install_deps
 
@@ -132,7 +152,8 @@ g++ -std=c++17 -O2 -o "$BUILD_DIR/loguard" \
     "$SRC_DIR"/src/integrity.cpp \
     "$SRC_DIR"/src/session.cpp "$SRC_DIR"/src/session_queue.cpp \
     "$SRC_DIR"/src/geoip.cpp "$SRC_DIR"/src/risk_engine.cpp \
-    "$SRC_DIR"/src/pattern_matcher.cpp "$SRC_DIR"/src/process_monitor.cpp
+    "$SRC_DIR"/src/pattern_matcher.cpp "$SRC_DIR"/src/process_monitor.cpp \
+    "$SRC_DIR"/src/immutable.cpp "$SRC_DIR"/src/deadman.cpp
 gcc -O2 -o "$BUILD_DIR/loguard-notify" "$SRC_DIR"/src/pam_hook.c
 log "Build succeeded."
 
@@ -237,6 +258,26 @@ fi
 
 log "Enabling monitoring (PAM hook, daemon, watchdog timer)..."
 /opt/loguard/bin/loguard enable
+
+# ---------------------------------------------------------------------------
+# 9. Admin passphrase (protects disable/uninstall/edit from casual misuse --
+#    see 'ANTI-TAMPER HARDENING' in `loguard help` for exactly what this
+#    does and does not protect against)
+# ---------------------------------------------------------------------------
+echo
+if [ -n "${LOGUARD_ADMIN_PASSWORD:-}" ]; then
+    log "Setting admin passphrase from LOGUARD_ADMIN_PASSWORD (non-interactive)..."
+    LOGUARD_ADMIN_PASSWORD="$LOGUARD_ADMIN_PASSWORD" /opt/loguard/bin/loguard set-password \
+        || warn "Passphrase setup failed -- run 'sudo loguard set-password' later."
+else
+    log "Set an admin passphrase? Required afterwards for 'disable'/'uninstall'/'edit'."
+    SET_PASS="$(read_tty 'Set passphrase now? [Y/n]' 'Y')"
+    case "$SET_PASS" in
+        [Nn]*) log "Skipped. Run 'sudo loguard set-password' any time to enable this." ;;
+        *) /opt/loguard/bin/loguard set-password < /dev/tty \
+             || warn "Passphrase setup skipped/failed -- run 'sudo loguard set-password' later." ;;
+    esac
+fi
 
 echo
 log "Done! Run 'loguard status' any time to check health, or 'loguard help' for all commands."

@@ -1,10 +1,12 @@
 [Unit]
-Description=Loguard Watchdog Timer
-Requires=loguard.service
+Description=Loguard Watchdog Check Timer (Every Minute)
+Documentation=https://github.com/Nowafen/Loguard
 
 [Timer]
-OnBootSec=1min
-OnUnitActiveSec=1min
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=1s
+Persistent=true
 
 [Install]
 WantedBy=timers.target

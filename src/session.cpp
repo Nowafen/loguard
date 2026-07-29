@@ -74,7 +74,7 @@ std::string Session::duration_str() const {
 std::string Session::build_initial_alert_html() const {
     std::ostringstream o;
     o << type_emoji << " <b>" << type_label << "</b>\n";
-    o << "━━━━━━━━━━━━━━━━━\n";
+    o << "━━━━━━━━━━━━━━━━━━━━\n";
     o << "👤 <b>User</b>\n" << user << " (uid=" << uid << ")\n\n";
 
     if (remote) {
@@ -101,7 +101,7 @@ std::string Session::build_initial_alert_html() const {
     o << "📟 <b>TTY</b>\n" << tty << "\n\n";
     o << "🕒 <b>Time</b>\n<code>" << util::now_str() << "</code>\n\n";
     o << "🆔 <b>Session</b>\n<code>" << id << "</code>\n";
-    o << "━━━━━━━━━━━━━━━━━\n";
+    o << "━━━━━━━━━━━━━━━━━━━━\n";
     o << "Risk: " << risk_emoji() << " " << risk_label() << " (" << risk_score() << ")";
     return o.str();
 }
@@ -109,7 +109,7 @@ std::string Session::build_initial_alert_html() const {
 std::string Session::build_summary_html() const {
     std::ostringstream o;
     o << "📋 <b>Session Summary</b>\n";
-    o << "━━━━━━━━━━━━━━━━━\n";
+    o << "━━━━━━━━━━━━━━━━━━━━\n";
     o << "🆔 <code>" << id << "</code>\n";
     o << "👤 " << user << " (uid=" << uid << ")\n";
     if (remote) {
@@ -121,7 +121,7 @@ std::string Session::build_summary_html() const {
         o << "\n";
     }
     o << "⏱ Duration: " << duration_str() << "\n";
-    o << "━━━━━━━━━━━━━━━━━\n";
+    o << "━━━━━━━━━━━━━━━━━━━━\n";
 
     if (!timeline.empty()) {
         o << "🕐 <b>Timeline</b>\n";
@@ -152,7 +152,7 @@ std::string Session::build_summary_html() const {
     o << "🔐 Privilege Escalation: " << (privilege_escalation ? "Yes" : "No") << "\n";
     o << "⚠️ Suspicious Events: " << suspicious_count << "\n";
     o << "🌐 Network Connections: " << network_connections << "\n";
-    o << "━━━━━━━━━━━━━━━━━\n";
+    o << "━━━━━━━━━━━━━━━━━━━━\n";
 
     if (!risk_entries.empty()) {
         o << "📊 <b>Risk Score</b>\n";
